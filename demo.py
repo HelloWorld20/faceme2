@@ -2,7 +2,6 @@ import os
 import argparse
 import torch
 import numpy as np
-import cv2
 from tqdm import tqdm
 from PIL import Image
 from diffusers import (
@@ -11,13 +10,13 @@ from diffusers import (
     DDPMScheduler,
     StableDiffusionXLControlNetPipeline,
 )
-from diffusers import UNet2DConditionModel as OriginalUNet2DConditionModel, StableDiffusionXLControlNetPipeline
+from diffusers import UNet2DConditionModel as OriginalUNet2DConditionModel
 from transformers import AutoTokenizer, PretrainedConfig, CLIPImageProcessor
 from huggingface_hub import hf_hub_download
 from arch.idencoder import PhotoMakerIDEncoder, Mix
 from utils.wavelet_color_fix import wavelet_reconstruction
 from utils.insightface_package import FaceAnalysis2, analyze_faces
-from typing import Any, Callable, Dict, List, Optional, Union, Tuple
+from typing import List
 from utils.load_photomaker import load_photomaker
 import gradio as gr
 

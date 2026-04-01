@@ -1,5 +1,10 @@
 import os
+import sys
 import argparse
+
+# 添加项目根目录到 Python 路径
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import cv2
 from PIL import Image
 import torch
@@ -39,6 +44,9 @@ def main(args):
             subdir , basename = path.split('/')[-2:]
 
         img = cv2.imread(path)
+        if img is None:
+            print(f"{path} can't be read (corrupted or unsupported format)")
+            continue
         img = cv2.cvtColor(img , cv2.COLOR_BGR2RGB)
         faces = analyze_faces(app, img)
 

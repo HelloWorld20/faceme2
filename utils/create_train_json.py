@@ -12,11 +12,18 @@ def main(args):
 
         target_path = os.path.join(args.ffhq_dir , file)
 
-        target_id_emb_path = os.path.join(args.ffhq_emb_dir, "id_emb" , num + '.npy')
-        target_clip_emb_path = os.path.join(args.ffhq_emb_dir, "clip_emb", num + '.npy')
+        target_id_emb_path = os.path.join(args.ffhq_emb_dir, num + '.npy')
+        target_clip_emb_path = os.path.join(args.ffhqref_emb_dir, num + '.npy')
         
-        ref_id_emb_dir = os.path.join(args.ffhqref_emb_dir, "id_emb" , num)
-        ref_clip_emb_dir = os.path.join(args.ffhqref_emb_dir, "clip_emb", num)
+        ref_id_emb_dir = os.path.join(args.ffhq_emb_dir, num)
+        ref_clip_emb_dir = os.path.join(args.ffhqref_emb_dir, num)
+        
+        if not os.path.exists(ref_id_emb_dir):
+            print(f"Warning: {ref_id_emb_dir} not found, skipping...")
+            continue
+        if not os.path.exists(ref_clip_emb_dir):
+            print(f"Warning: {ref_clip_emb_dir} not found, skipping...")
+            continue
         
         ref_id_emb_paths = [os.path.join(ref_id_emb_dir, f) for f in os.listdir(ref_id_emb_dir)]
         ref_clip_emb_paths = [os.path.join(ref_clip_emb_dir, f) for f in os.listdir(ref_clip_emb_dir)]
@@ -35,10 +42,10 @@ def main(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument("--ffhq_dir", type=str)
-    parser.add_argument("--ffhq_emb_dir", type=str)
-    parser.add_argument("--ffhqref_emb_dir", type=str)
-    parser.add_argument("--save_dir", type=str)
+    parser.add_argument("--ffhq_dir", type=str, help="FFHQ图像目录")
+    parser.add_argument("--ffhq_emb_dir", type=str, help="FFHQ ID嵌入目录 (output/id_emb/)")
+    parser.add_argument("--ffhqref_emb_dir", type=str, help="FFHQRef CLIP嵌入目录 (output/clip_emb/)")
+    parser.add_argument("--save_dir", type=str, help="输出JSON保存目录")
     args = parser.parse_args()
     os.makedirs(args.save_dir , exist_ok=True)
 

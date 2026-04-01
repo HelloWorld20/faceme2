@@ -11,7 +11,7 @@ from diffusers import (
     DDPMScheduler,
     StableDiffusionXLControlNetPipeline,
 )
-from diffusers import UNet2DConditionModel as OriginalUNet2DConditionModel, StableDiffusionXLControlNetPipeline
+from diffusers import UNet2DConditionModel as OriginalUNet2DConditionModel
 from transformers import AutoTokenizer, PretrainedConfig, CLIPImageProcessor
 from huggingface_hub import hf_hub_download
 from peft import LoraConfig, get_peft_model
@@ -19,7 +19,7 @@ from arch.idencoder import PhotoMakerIDEncoder, Mix
 from utils.wavelet_color_fix import wavelet_reconstruction
 from utils.insightface_package import FaceAnalysis2, analyze_faces
 from diffusers.utils import convert_unet_state_dict_to_peft
-from typing import Any, Callable, Dict, List, Optional, Union, Tuple
+from typing import Dict, Union
 from diffusers.utils import _get_model_file
 from safetensors import safe_open
 
@@ -50,7 +50,7 @@ def load_photomaker_adapter(
                 weights_name=weight_name,
                 cache_dir=cache_dir,
                 force_download=force_download,
-                resume_download=resume_download,
+                # resume_download=resume_download,
                 proxies=proxies,
                 local_files_only=local_files_only,
                 use_auth_token=token,
@@ -190,6 +190,16 @@ def main(args):
     controlnet = ControlNetModel.from_pretrained(args.controlnet_model_name_or_path)
     mix = Mix()
     mix.from_pretrained(args.mix_path)
+
+    # 初始化人脸检测模型 (InsightFace) - 添加调试信息
+    model_dir = './models/antelopev2'
+    print(f"[DEBUG] Current dir: {os.getcwd()}")
+    print(f"[DEBUG] Looking for models in: {model_dir}")
+    if os.path.exists(model_dir):
+        print(f"[DEBUG] Files in {model_dir}: {os.listdir(model_dir)}")
+    else:
+        print(f"[DEBUG] Directory {model_dir} does not exist!")
+    
     
     app = FaceAnalysis2(name='antelopev2', root='./', providers=['CUDAExecutionProvider', 'CPUExecutionProvider'])
     app.prepare(ctx_id=0, det_size=(512, 512))

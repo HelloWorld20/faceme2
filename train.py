@@ -18,14 +18,13 @@ from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import ProjectConfiguration, set_seed
 from diffusers.optimization import get_scheduler
-from diffusers import AutoencoderKL, DDPMScheduler
-from diffusers.utils import check_min_version, is_wandb_available, convert_unet_state_dict_to_peft
+from diffusers.utils import is_wandb_available
 from diffusers.utils.torch_utils import is_compiled_module
-from huggingface_hub import create_repo, upload_folder , hf_hub_download , snapshot_download
+from huggingface_hub import hf_hub_download
 from utils.load_photomaker import load_photomaker
 from arch.idencoder import Mix
 if is_wandb_available():
-    import wandb
+    pass
 
 logger = get_logger(__name__, log_level="INFO")
 
@@ -65,6 +64,8 @@ def make_train_dataset(args, tokenizer, text_encoder):
                               truncation=True,
                               return_tensors="pt",).input_ids
     prompt_embeds , pooled_prompt_embeds = encode_prompt(text_encoders=text_encoder, text_input_ids_list=[tokens_one, tokens_two])
+    prompt_embeds = prompt_embeds.detach().cpu()
+    pooled_prompt_embeds = pooled_prompt_embeds.detach().cpu()
     crops_coords_top_left = (0, 0)
     original_size = (args.resolution, args.resolution)
     target_size = (args.resolution, args.resolution)
@@ -78,6 +79,11 @@ def make_train_dataset(args, tokenizer, text_encoder):
                                   tokens_one=tokens_one.squeeze(dim=0), 
                                   add_time_ids=add_time_ids.squeeze(dim=0), )    
    
+      
+    if args.max_train_samples is not None:
+        train_dataset = torch.utils.data.Subset(train_dataset, list(range(min(args.max_train_samples, len(train_dataset)))))
+    
+
     return train_dataset
 
 def main(args):
@@ -130,7 +136,7 @@ def main(args):
 
     # add id mix 
     mix = Mix()
-    if args.mix_pretrained_path is not None:
+    if args.mix_pretrained_path is not None and args.mix_pretrained_path.lower() != "none":
         mix.from_pretrained(args.mix_pretrained_path)
     ###
 
@@ -418,6 +424,8 @@ if __name__ == '__main__':
     parser.add_argument("--train_data_dir", type=str, )
     parser.add_argument("--null_prompt_p", type=float, default=0.5)
     parser.add_argument("--exp_name", type=str, default="faceme")
+    parser.add_argument("--max_train_samples", type=int, default=None, help="限制训练样本数量，用于快速测试")
+
     
     args = parser.parse_args()
     if args.resolution % 8 != 0:

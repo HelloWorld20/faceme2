@@ -5,7 +5,6 @@ import cv2
 import torch.utils.data as data
 from utils.degradation import random_mixed_kernels
 from utils.degradation import (
-    random_mixed_kernels,
     random_add_gaussian_noise,
     random_add_jpg_compression
 )
@@ -83,8 +82,8 @@ class FaceMeDataset(data.Dataset):
         ref_id_embs = []
         ref_clip_embs = []
         for id_emb_path, clip_emb_path in ref_emb_path:
-            id_emb = torch.load(id_emb_path,map_location=torch.device('cpu')).requires_grad_(False)
-            clip_emb = torch.load(clip_emb_path,map_location=torch.device('cpu')).requires_grad_(False)
+            id_emb = torch.from_numpy(np.load(id_emb_path)).requires_grad_(False)
+            clip_emb = torch.from_numpy(np.load(clip_emb_path)).requires_grad_(False)
             if id_emb.ndimension() == 1:
                 id_emb = id_emb.unsqueeze(dim=0)
             ref_id_embs.append(id_emb)
