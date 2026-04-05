@@ -36,3 +36,20 @@ CUDA_VISIBLE_DEVICES=7 python train.py --pretrained_model_name_or_path "SG161222
 
 用所有卡，训练5000个数据集，resolution改为1024
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 accelerate launch --num_processes=8 train.py --pretrained_model_name_or_path "SG161222/RealVisXL_V3.0" --mix_pretrained_path "./weights/mix" --output_dir "./output/train_results" --train_data_dir "output/train_json/train.json" --resolution 1024 --report_to "wandb" --learning_rate 1e-5 --train_batch_size 2 --gradient_accumulation_steps 1 --lr_scheduler cosine --lr_warmup_steps 500 --num_workers 4 --mixed_precision fp16 --num_train_epochs 20 --max_train_samples 5000
+
+# 小数据集预处理
+
+python utils/preprocess.py \
+ --input_dir "data/CelebHQRefForRelease" \
+ --id_emb_save_dir "output/id_emb/" \
+ --clip_emb_save_dir "output/clip_emb/" \
+ --dataset_name "CelebHQRef"
+
+# 小数据集生成 train.json
+
+python utils/create_train_json.py \
+ --dataset_type "CelebHQRef" \
+ --celebhq_dir "data/CelebHQRefForRelease" \
+ --id_emb_dir "output/id_emb/" \
+ --clip_emb_dir "output/clip_emb/" \
+ --save_dir "output/train_json/"
