@@ -127,7 +127,10 @@ def main(args):
     unet = OriginalUNet2DConditionModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="unet", )
 
     #merge photomaker weights
-    photomaker_path = hf_hub_download(repo_id="TencentARC/PhotoMaker", filename="photomaker-v1.bin", repo_type="model")
+    photomaker_path = "./models/photomaker-v1.bin"
+    if not os.path.exists(photomaker_path):
+        logger.info(f"Downloading PhotoMaker checkpoint to {photomaker_path}...")
+        photomaker_path = hf_hub_download(repo_id="TencentARC/PhotoMaker", filename="photomaker-v1.bin", repo_type="model")
     _, unet = load_photomaker(photomaker_path, clip_id_encoder=None, unet=unet)
      ###
 

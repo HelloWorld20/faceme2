@@ -37,7 +37,10 @@ def main(args):
                 if file.lower().endswith(('.png', '.jpg', '.jpeg')):
                     files.append(os.path.join(person_dir, file))
 
-    photomaker_path = hf_hub_download(repo_id="TencentARC/PhotoMaker", filename="photomaker-v1.bin", repo_type="model")
+    photomaker_path = "./models/photomaker-v1.bin"
+    if not os.path.exists(photomaker_path):
+        print(f"Downloading PhotoMaker checkpoint to {photomaker_path}...")
+        photomaker_path = hf_hub_download(repo_id="TencentARC/PhotoMaker", filename="photomaker-v1.bin", repo_type="model")
     id_encoder_clip = PhotoMakerIDEncoder()
     id_encoder_clip, _ = load_photomaker(photomaker_path, clip_id_encoder=id_encoder_clip, unet=None)
     id_encoder_clip = id_encoder_clip.to("cuda")
