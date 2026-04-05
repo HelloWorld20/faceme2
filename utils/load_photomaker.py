@@ -25,18 +25,25 @@ def load_photomaker_adapter(
         }
 
         if not isinstance(pretrained_model_name_or_path_or_dict, dict):
-            model_file = _get_model_file(
-                pretrained_model_name_or_path_or_dict,
-                weights_name=weight_name,
-                cache_dir=cache_dir,
-                force_download=force_download,
-                proxies=proxies,
-                local_files_only=local_files_only,
-                use_auth_token=token,
-                revision=revision,
-                subfolder=subfolder,
-                user_agent=user_agent,
-            )
+            # First check if it's a local path directly
+            model_file = None
+            if os.path.exists(os.path.join(pretrained_model_name_or_path_or_dict, weight_name)):
+                model_file = os.path.join(pretrained_model_name_or_path_or_dict, weight_name)
+            else:
+                # If not local, fallback to diffusers download logic
+                model_file = _get_model_file(
+                    pretrained_model_name_or_path_or_dict,
+                    weights_name=weight_name,
+                    cache_dir=cache_dir,
+                    force_download=force_download,
+                    proxies=proxies,
+                    local_files_only=local_files_only,
+                    use_auth_token=token,
+                    revision=revision,
+                    subfolder=subfolder,
+                    user_agent=user_agent,
+                )
+            
             if weight_name.endswith(".safetensors"):
                 state_dict = {"id_encoder": {}, "lora_weights": {}}
                 with safe_open(model_file, framework="pt", device="cpu") as f:

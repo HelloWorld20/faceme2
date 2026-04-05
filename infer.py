@@ -161,7 +161,10 @@ def main(args):
         args.pretrained_model_name_or_path, subfolder="unet",
     )
 
-    photomaker_path = hf_hub_download(repo_id="TencentARC/PhotoMaker", filename="photomaker-v1.bin", repo_type="model")
+    photomaker_path = "./models/photomaker-v1.bin"
+    if not os.path.exists(photomaker_path):
+        print(f"Downloading PhotoMaker checkpoint to {photomaker_path}...")
+        photomaker_path = hf_hub_download(repo_id="TencentARC/PhotoMaker", filename="photomaker-v1.bin", repo_type="model")
     id_encoder_clip_state_dict, lora_state_dict = load_photomaker_adapter(
         os.path.dirname(photomaker_path),
         subfolder="",

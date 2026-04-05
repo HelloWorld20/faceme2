@@ -113,7 +113,10 @@ def prepare(args):
         args.pretrained_model_name_or_path, subfolder="unet",
     )
     id_encoder_clip = PhotoMakerIDEncoder()
-    photomaker_path = hf_hub_download(repo_id="TencentARC/PhotoMaker", filename="photomaker-v1.bin", repo_type="model")
+    photomaker_path = "./models/photomaker-v1.bin"
+    if not os.path.exists(photomaker_path):
+        print(f"Downloading PhotoMaker checkpoint to {photomaker_path}...")
+        photomaker_path = hf_hub_download(repo_id="TencentARC/PhotoMaker", filename="photomaker-v1.bin", repo_type="model")
     id_encoder_clip, unet = load_photomaker(photomaker_path, clip_id_encoder=id_encoder_clip, unet=unet)
     controlnet = ControlNetModel.from_pretrained(args.controlnet_model_name_or_path)
     mix = Mix()
