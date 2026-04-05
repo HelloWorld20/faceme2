@@ -27,6 +27,15 @@ def main(args):
             for pos2 in os.listdir(os.path.join(args.input_dir, pos1)):
                 for file in os.listdir(os.path.join(args.input_dir, pos1, pos2)):
                     files.append(os.path.join(args.input_dir, pos1, pos2, file))
+    elif args.dataset_name == 'CelebHQRef':
+        files = []
+        for person_id in os.listdir(args.input_dir):
+            person_dir = os.path.join(args.input_dir, person_id)
+            if not os.path.isdir(person_dir):
+                continue
+            for file in os.listdir(person_dir):
+                if file.lower().endswith(('.png', '.jpg', '.jpeg')):
+                    files.append(os.path.join(person_dir, file))
 
     photomaker_path = hf_hub_download(repo_id="TencentARC/PhotoMaker", filename="photomaker-v1.bin", repo_type="model")
     id_encoder_clip = PhotoMakerIDEncoder()
@@ -40,7 +49,7 @@ def main(args):
     for path in tqdm(files):
         if args.dataset_name == 'FFHQ':
             basename = os.path.basename(path)
-        elif args.dataset_name == 'FFHQRef':
+        elif args.dataset_name in ['FFHQRef', 'CelebHQRef']:
             subdir , basename = path.split('/')[-2:]
 
         img = cv2.imread(path)
@@ -75,6 +84,11 @@ def main(args):
             os.makedirs(os.path.join(args.id_emb_save_dir, basename.split('.')[0]), exist_ok=True)
             np.save(os.path.join(args.clip_emb_save_dir, basename.split('.')[0], subdir[-3:] + '.npy'), clip_emb)
             np.save(os.path.join(args.id_emb_save_dir, basename.split('.')[0], subdir[-3:] + '.npy'), emb)
+        elif args.dataset_name == 'CelebHQRef':
+            os.makedirs(os.path.join(args.clip_emb_save_dir, subdir), exist_ok=True)
+            os.makedirs(os.path.join(args.id_emb_save_dir, subdir), exist_ok=True)
+            np.save(os.path.join(args.clip_emb_save_dir, subdir, basename.split('.')[0] + '.npy'), clip_emb)
+            np.save(os.path.join(args.id_emb_save_dir, subdir, basename.split('.')[0] + '.npy'), emb)
             
 
 if __name__ == '__main__':
@@ -82,7 +96,7 @@ if __name__ == '__main__':
     parser.add_argument("--input_dir", type=str, default=None)
     parser.add_argument("--id_emb_save_dir", type=str, default=None)
     parser.add_argument("--clip_emb_save_dir", type=str, default=None)
-    parser.add_argument("--dataset_name", type=str, choices=["FFHQ", "FFHQRef"], default='FFHQRef')
+    parser.add_argument("--dataset_name", type=str, choices=["FFHQ", "FFHQRef", "CelebHQRef"], default='FFHQRef')
     args = parser.parse_args()
     os.makedirs(args.id_emb_save_dir, exist_ok=True)
     os.makedirs(args.clip_emb_save_dir, exist_ok=True)
