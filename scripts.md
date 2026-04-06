@@ -45,12 +45,32 @@ python utils/preprocess.py \
  --clip_emb_save_dir "output/clip_emb/" \
  --dataset_name "CelebHQRef"
 
-# 用 1~5 号共 5 张卡训练（多卡分布式训练）
+# 用 1~5 号共 5 张卡训练（多卡分布式训练，方案A：降低分辨率到 256 测试显存极限）
 
 CUDA_VISIBLE_DEVICES=1,2,3,4,5 accelerate launch --num_processes=5 train.py \
  --pretrained_model_name_or_path "/data/weijianghong/workspace/faceme2/models/RealVisXL_V3.0" \
  --mix_pretrained_path "None" \
  --output_dir "./output/train_results" \
+ --train_data_dir "output/train_json/train.json" \
+ --resolution 256 \
+ --report_to "wandb" \
+ --learning_rate 5e-5 \
+ --train_batch_size 1 \
+ --mixed_precision fp16 \
+ --num_workers 4 \
+ --gradient_accumulation_steps 2 \
+ --num_train_epochs 100 \
+ --checkpoint_steps 1000 \
+ --max_train_samples 1000
+
+# 用 1~5 号共 5 张卡训练（多卡分布式训练，方案B：使用 DeepSpeed ZeRO-2 共享显存池）
+
+# 注意：你需要先在服务器上安装 DeepSpeed： pip install deepspeed
+
+CUDA_VISIBLE_DEVICES=1,2,3,4,5 accelerate launch --config_file deepspeed_config.yaml train.py \
+ --pretrained_model_name_or_path "/data/weijianghong/workspace/faceme2/models/RealVisXL_V3.0" \
+ --mix_pretrained_path "None" \
+ --output_dir "./output/train_results_deepspeed" \
  --train_data_dir "output/train_json/train.json" \
  --resolution 512 \
  --report_to "wandb" \
