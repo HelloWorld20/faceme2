@@ -153,6 +153,9 @@ def main(args):
         mix.requires_grad_(True)    
     controlnet.requires_grad_(True)
 
+    unet.enable_gradient_checkpointing()
+    controlnet.enable_gradient_checkpointing()
+
     weight_dtype = torch.float32
     if accelerator.mixed_precision == "fp16":
         weight_dtype = torch.float16
