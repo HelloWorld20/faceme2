@@ -45,20 +45,20 @@ python utils/preprocess.py \
  --clip_emb_save_dir "output/clip_emb/" \
  --dataset_name "CelebHQRef"
 
-# 用 0~5 号共 6 张卡训练（多卡分布式训练）
+# 用 1~5 号共 5 张卡训练（多卡分布式训练）
 
-CUDA_VISIBLE_DEVICES=0,1,2,3,4,5 accelerate launch --num_processes=6 train.py \
- --pretrained_model_name_or_path "SG161222/RealVisXL_V3.0" \
+CUDA_VISIBLE_DEVICES=1,2,3,4,5 accelerate launch --num_processes=5 train.py \
+ --pretrained_model_name_or_path "/data/weijianghong/workspace/faceme2/models/RealVisXL_V3.0" \
  --mix_pretrained_path "None" \
  --output_dir "./output/train_results" \
  --train_data_dir "output/train_json/train.json" \
  --resolution 512 \
  --report_to "wandb" \
  --learning_rate 5e-5 \
- --train_batch_size 2 \
+ --train_batch_size 1 \
  --mixed_precision fp16 \
  --num_workers 4 \
- --gradient_accumulation_steps 1 \
+ --gradient_accumulation_steps 2 \
  --num_train_epochs 100 \
  --checkpoint_steps 1000 \
  --max_train_samples 1000
