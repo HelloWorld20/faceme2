@@ -185,9 +185,13 @@ def main(args):
     try:
         import torch._dynamo
         if hasattr(torch, "compile"):
-            logger.info("Using torch.compile to optimize UNet and ControlNet execution.")
-            unet = torch.compile(unet, mode="reduce-overhead", fullgraph=True)
-            controlnet = torch.compile(controlnet, mode="reduce-overhead", fullgraph=True)
+            logger.info("Temporarily disabled torch.compile due to DDP conflict (DDPOptimizer backend: Found a higher order op).")
+            # unet = torch.compile(unet, mode="reduce-overhead", fullgraph=True)
+            # controlnet = torch.compile(controlnet, mode="reduce-overhead", fullgraph=True)
+            
+            # If we must use it, we can suppress errors:
+            # torch._dynamo.config.suppress_errors = True
+            # torch._dynamo.config.optimize_ddp = False
     except ImportError:
         logger.warning("torch.compile is not available. Please upgrade to PyTorch 2.0+ for better performance and memory optimization.")
 
