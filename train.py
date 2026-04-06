@@ -105,9 +105,10 @@ def main(args):
             os.makedirs(args.output_dir, exist_ok=True)
             
     # Add initial memory log
-    if torch.cuda.is_available():
-        allocated = torch.cuda.memory_allocated() / (1024 ** 3)
-        reserved = torch.cuda.memory_reserved() / (1024 ** 3)
+    import torch as th  # Use alias to avoid UnboundLocalError
+    if th.cuda.is_available():
+        allocated = th.cuda.memory_allocated() / (1024 ** 3)
+        reserved = th.cuda.memory_reserved() / (1024 ** 3)
         logger.info(f"Initial GPU Memory: {allocated:.2f} GB Allocated, {reserved:.2f} GB Reserved")
 
     tokenizer_one = AutoTokenizer.from_pretrained(
@@ -345,9 +346,9 @@ def main(args):
     logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
     logger.info(f"  Total optimization steps = {args.max_train_steps}")
     
-    if torch.cuda.is_available():
-        allocated = torch.cuda.memory_allocated() / (1024 ** 3)
-        reserved = torch.cuda.memory_reserved() / (1024 ** 3)
+    if th.cuda.is_available():
+        allocated = th.cuda.memory_allocated() / (1024 ** 3)
+        reserved = th.cuda.memory_reserved() / (1024 ** 3)
         logger.info(f"Before Training Loop GPU Memory: {allocated:.2f} GB Allocated, {reserved:.2f} GB Reserved")
     global_step = 0
     first_epoch = 0
@@ -440,9 +441,9 @@ def main(args):
                 global_step += 1
                 
                 # Add step-level memory log
-                if global_step % 10 == 0 and torch.cuda.is_available():
-                    allocated = torch.cuda.memory_allocated() / (1024 ** 3)
-                    reserved = torch.cuda.memory_reserved() / (1024 ** 3)
+                if global_step % 10 == 0 and th.cuda.is_available():
+                    allocated = th.cuda.memory_allocated() / (1024 ** 3)
+                    reserved = th.cuda.memory_reserved() / (1024 ** 3)
                     logger.info(f"[Step {global_step}] GPU Memory: {allocated:.2f} GB Allocated, {reserved:.2f} GB Reserved")
                 if accelerator.is_main_process:
                     
