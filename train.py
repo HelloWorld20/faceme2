@@ -103,6 +103,12 @@ def main(args):
     if accelerator.is_main_process:
         if args.output_dir is not None:
             os.makedirs(args.output_dir, exist_ok=True)
+            
+    # Add initial memory log
+    if torch.cuda.is_available():
+        allocated = torch.cuda.memory_allocated() / (1024 ** 3)
+        reserved = torch.cuda.memory_reserved() / (1024 ** 3)
+        logger.info(f"Initial GPU Memory: {allocated:.2f} GB Allocated, {reserved:.2f} GB Reserved")
 
     tokenizer_one = AutoTokenizer.from_pretrained(
         args.pretrained_model_name_or_path,
@@ -144,6 +150,9 @@ def main(args):
     ###
 
     vae.requires_grad_(False)
+    vae.enable_slicing()
+    vae.enable_tiling()
+    
     text_encoder_one.requires_grad_(False)
     text_encoder_two.requires_grad_(False)
     unet.requires_grad_(False)
@@ -171,6 +180,16 @@ def main(args):
     unet.enable_gradient_checkpointing()
     controlnet.enable_gradient_checkpointing()
 
+    # Use torch.compile if PyTorch >= 2.0 is available
+    try:
+        import torch._dynamo
+        if hasattr(torch, "compile"):
+            logger.info("Using torch.compile to optimize UNet and ControlNet execution.")
+            unet = torch.compile(unet, mode="reduce-overhead", fullgraph=True)
+            controlnet = torch.compile(controlnet, mode="reduce-overhead", fullgraph=True)
+    except ImportError:
+        logger.warning("torch.compile is not available. Please upgrade to PyTorch 2.0+ for better performance and memory optimization.")
+
     weight_dtype = torch.float32
     if accelerator.mixed_precision == "fp16":
         weight_dtype = torch.float16
@@ -188,7 +207,16 @@ def main(args):
         params_to_optimize = itertools.chain(controlnet.parameters())
     else :
         params_to_optimize = itertools.chain(controlnet.parameters(), mix.parameters())
-    optimizer = torch.optim.AdamW(
+        
+    try:
+        import bitsandbytes as bnb
+        optimizer_class = bnb.optim.AdamW8bit
+        logger.info("Using 8-bit AdamW optimizer to save VRAM.")
+    except ImportError:
+        optimizer_class = torch.optim.AdamW
+        logger.warning("bitsandbytes not available, using standard AdamW. This will use significantly more VRAM.")
+
+    optimizer = optimizer_class(
         params_to_optimize,
         lr=args.learning_rate,
         betas=(0.9, 0.999),
@@ -316,6 +344,11 @@ def main(args):
     logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
     logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
     logger.info(f"  Total optimization steps = {args.max_train_steps}")
+    
+    if torch.cuda.is_available():
+        allocated = torch.cuda.memory_allocated() / (1024 ** 3)
+        reserved = torch.cuda.memory_reserved() / (1024 ** 3)
+        logger.info(f"Before Training Loop GPU Memory: {allocated:.2f} GB Allocated, {reserved:.2f} GB Reserved")
     global_step = 0
     first_epoch = 0
     initial_global_step = 0
@@ -395,12 +428,22 @@ def main(args):
                 accelerator.backward(loss)
                 optimizer.step()
                 lr_scheduler.step()
-                optimizer.zero_grad()
+                optimizer.zero_grad(set_to_none=True)
+                
+                # Explicitly empty CUDA cache to prevent fragmentation buildup
+                if step % 100 == 0:
+                    torch.cuda.empty_cache()
 
             # Checks if the accelerator has performed an optimization step behind the scenes
             if accelerator.sync_gradients:
                 progress_bar.update(1)
                 global_step += 1
+                
+                # Add step-level memory log
+                if global_step % 10 == 0 and torch.cuda.is_available():
+                    allocated = torch.cuda.memory_allocated() / (1024 ** 3)
+                    reserved = torch.cuda.memory_reserved() / (1024 ** 3)
+                    logger.info(f"[Step {global_step}] GPU Memory: {allocated:.2f} GB Allocated, {reserved:.2f} GB Reserved")
                 if accelerator.is_main_process:
                     
                     if global_step % args.checkpoint_steps == 0:
