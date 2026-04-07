@@ -460,12 +460,15 @@ def main(args):
                     allocated = th.cuda.memory_allocated() / (1024 ** 3)
                     reserved = th.cuda.memory_reserved() / (1024 ** 3)
                     logger.info(f"[Step {global_step}] GPU Memory: {allocated:.2f} GB Allocated, {reserved:.2f} GB Reserved")
-                if accelerator.is_main_process:
-                    
-                    if global_step % args.checkpoint_steps == 0:
+                
+                # 修复卡死问题：所有进程必须同步等待保存操作
+                if global_step % args.checkpoint_steps == 0:
+                    accelerator.wait_for_everyone() # 确保所有卡都跑到这一步
+                    if accelerator.is_main_process:
                         save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
                         accelerator.save_state(save_path)
                         logger.info(f"Saved state to {save_path}")
+                    accelerator.wait_for_everyone() # 确保主进程保存完，其他进程再继续
 
              
 
