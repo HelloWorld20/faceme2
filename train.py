@@ -161,7 +161,18 @@ def main(args):
         mix.requires_grad_(False)
     else:
         mix.requires_grad_(True)    
-    controlnet.requires_grad_(True)
+        
+    # === 部分冻结 ControlNet 以节省显存 ===
+    controlnet.requires_grad_(False) # 先把全部参数冻结
+    
+    # 只解冻 mid_block (中层) 和 controlnet_down_blocks (特征注入层)
+    # 冻结庞大的基础 down_blocks，大幅减少需要计算梯度的参数量
+    for name, param in controlnet.named_parameters():
+        if "mid_block" in name or "controlnet_down_blocks" in name:
+            param.requires_grad = True
+            
+    logger.info("Partially frozen ControlNet: Only training mid_block and controlnet_down_blocks to save VRAM.")
+    # ======================================
 
     # Use memory efficient attention if xformers is available
     import diffusers
