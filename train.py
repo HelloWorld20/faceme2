@@ -30,7 +30,7 @@ logger = get_logger(__name__, log_level="INFO")
 
 def load_config(config_path):
     """
-    Load the configuration file and return the configuration dictionary.
+    加载配置文件并返回配置字典。
     """
     with open(config_path, "r") as file:
         config = json.load(file)
@@ -38,18 +38,20 @@ def load_config(config_path):
 
 
 def make_train_dataset(args, tokenizer, text_encoder):
+    # 编码文本提示词
     def encode_prompt(text_encoders, text_input_ids_list=None):
         prompt_embeds_list = []
         for i, text_encoder in enumerate(text_encoders):
             prompt_embeds = text_encoder(
                 text_input_ids_list[i].to(text_encoder.device), output_hidden_states=True, return_dict=False
             )
-            # We are only ALWAYS interested in the pooled output of the final text encoder
+            # 我们总是只关注最终文本编码器的池化输出 (pooled output)
             pooled_prompt_embeds = prompt_embeds[0]
             prompt_embeds = prompt_embeds[-1][-2]
             bs_embed, seq_len, _ = prompt_embeds.shape
             prompt_embeds = prompt_embeds.view(bs_embed, seq_len, -1)
             prompt_embeds_list.append(prompt_embeds)
+        # 拼接多个文本编码器的输出
         prompt_embeds = torch.concat(prompt_embeds_list, dim=-1)
         pooled_prompt_embeds = pooled_prompt_embeds.view(bs_embed, -1)
         return prompt_embeds, pooled_prompt_embeds
@@ -104,13 +106,14 @@ def main(args):
         if args.output_dir is not None:
             os.makedirs(args.output_dir, exist_ok=True)
             
-    # Add initial memory log
-    import torch as th  # Use alias to avoid UnboundLocalError
+    # 添加初始显存日志
+    import torch as th  # 使用别名以避免 UnboundLocalError
     if th.cuda.is_available():
         allocated = th.cuda.memory_allocated() / (1024 ** 3)
         reserved = th.cuda.memory_reserved() / (1024 ** 3)
         logger.info(f"Initial GPU Memory: {allocated:.2f} GB Allocated, {reserved:.2f} GB Reserved")
 
+    # 初始化分词器
     tokenizer_one = AutoTokenizer.from_pretrained(
         args.pretrained_model_name_or_path,
         subfolder="tokenizer",
@@ -125,15 +128,17 @@ def main(args):
     token_id_one = tokenizer_one.encode("face")[1]
     token_id_two = tokenizer_two.encode("face")[1]
     
+    # 初始化文本编码器
     text_encoder_one = CLIPTextModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="text_encoder", )
     text_encoder_two = CLIPTextModelWithProjection.from_pretrained(args.pretrained_model_name_or_path, subfolder="text_encoder_2", )
 
     noise_scheduler = DDPMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
     
+    # 初始化 VAE 和 UNet
     vae = AutoencoderKL.from_pretrained(args.pretrained_model_name_or_path, subfolder="vae",)
     unet = OriginalUNet2DConditionModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="unet", )
 
-    #merge photomaker weights
+    # 合并 photomaker 权重
     photomaker_path = "./models/photomaker-v1.bin"
     if not os.path.exists(photomaker_path):
         logger.info(f"Downloading PhotoMaker checkpoint to {photomaker_path}...")
@@ -141,10 +146,10 @@ def main(args):
     _, unet = load_photomaker(photomaker_path, clip_id_encoder=None, unet=unet)
      ###
 
-    ## Initializing controlnet weights from unet 
+    ## 从 unet 初始化 controlnet 权重 
     controlnet = ControlNetModel.from_unet(unet)
 
-    # add id mix 
+    # 添加 id mix 模块
     mix = Mix()
     if args.mix_pretrained_path is not None and args.mix_pretrained_path.lower() != "none":
         mix.from_pretrained(args.mix_pretrained_path)
@@ -174,7 +179,7 @@ def main(args):
     logger.info("Partially frozen ControlNet: Only training mid_block and controlnet_down_blocks to save VRAM.")
     # ======================================
 
-    # Use memory efficient attention if xformers is available
+    # 如果 xformers 可用，则使用内存高效的注意力机制 (memory efficient attention)
     import diffusers
     if diffusers.utils.is_xformers_available():
         import xformers
@@ -182,29 +187,29 @@ def main(args):
         xformers_version = version.parse(xformers.__version__)
         if xformers_version == version.parse("0.0.16"):
             logger.warning(
-                "xFormers 0.0.16 cannot be used for training in some GPUs. If you observe problems during training, please update xFormers to at least 0.0.17. See https://huggingface.co/docs/diffusers/main/en/optimization/xformers for more details."
+                "xFormers 0.0.16 无法在某些 GPU 上用于训练。如果在训练期间观察到问题，请将 xFormers 更新至至少 0.0.17。详情请见 https://huggingface.co/docs/diffusers/main/en/optimization/xformers。"
             )
         unet.enable_xformers_memory_efficient_attention()
         controlnet.enable_xformers_memory_efficient_attention()
     else:
-        logger.warning("xformers is not available. Make sure it is installed correctly")
+        logger.warning("xformers 不可用。请确保其已正确安装")
 
     unet.enable_gradient_checkpointing()
     controlnet.enable_gradient_checkpointing()
 
-    # Use torch.compile if PyTorch >= 2.0 is available
+    # 如果 PyTorch >= 2.0 可用，尝试使用 torch.compile 进行加速
     try:
         import torch._dynamo
         if hasattr(torch, "compile"):
-            logger.info("Temporarily disabled torch.compile due to DDP conflict (DDPOptimizer backend: Found a higher order op).")
+            logger.info("由于 DDP 冲突（DDPOptimizer 后端：发现高阶操作），暂时禁用了 torch.compile。")
             # unet = torch.compile(unet, mode="reduce-overhead", fullgraph=True)
             # controlnet = torch.compile(controlnet, mode="reduce-overhead", fullgraph=True)
             
-            # If we must use it, we can suppress errors:
+            # 如果必须使用它，我们可以抑制错误：
             # torch._dynamo.config.suppress_errors = True
             # torch._dynamo.config.optimize_ddp = False
     except ImportError:
-        logger.warning("torch.compile is not available. Please upgrade to PyTorch 2.0+ for better performance and memory optimization.")
+        logger.warning("torch.compile 不可用。请升级到 PyTorch 2.0+ 以获得更好的性能和显存优化。")
 
     weight_dtype = torch.float32
     if accelerator.mixed_precision == "fp16":
@@ -227,10 +232,10 @@ def main(args):
     try:
         import bitsandbytes as bnb
         optimizer_class = bnb.optim.AdamW8bit
-        logger.info("Using 8-bit AdamW optimizer to save VRAM.")
+        logger.info("使用 8-bit AdamW 优化器以节省显存。")
     except ImportError:
         optimizer_class = torch.optim.AdamW
-        logger.warning("bitsandbytes not available, using standard AdamW. This will use significantly more VRAM.")
+        logger.warning("bitsandbytes 不可用，使用标准的 AdamW。这会占用显著更多的显存。")
 
     optimizer = optimizer_class(
         params_to_optimize,
@@ -241,6 +246,7 @@ def main(args):
     )
 
     train_dataset = make_train_dataset(args, [tokenizer_one, tokenizer_two], [text_encoder_one, text_encoder_two])
+    # 自定义批处理合并函数 (collate_fn)
     def custom_collate_fn(batch):
         gt = torch.stack([torch.tensor(item['target']) for item in batch])
         control = torch.stack([torch.tensor(item['control']) for item in batch])
@@ -249,6 +255,7 @@ def main(args):
         tokens_one = torch.stack([item['tokens_one'] for item in batch])
         add_time_ids = torch.stack([item['add_time_ids'] for item in batch])
 
+        # 处理是否使用空提示词进行无条件生成
         if args.mix_pretrained_path is not None and random.random() > float(args.null_prompt_p):
             return dict(target=gt,control=control, prompt_embeds=prompt_embeds, pooled_prompt_embeds=pooled_prompt_embeds ,add_time_ids=add_time_ids)
         else :  
@@ -258,6 +265,7 @@ def main(args):
             random_num = random.randint(1, 4)        
             ref_id_emb = ref_id_emb[:, :random_num, :]
             ref_clip_emb = ref_clip_emb[:, :random_num, :]
+            # 找到特定 token 进行特征替换/混合
             index = torch.where(tokens_one == token_id_one)[1][0]
             pref = prompt_embeds[:, :index, :]
             sufx = prompt_embeds[:, index + 1:, :]
@@ -272,8 +280,8 @@ def main(args):
         num_workers=args.num_workers,
     )
 
-    # Scheduler and math around the number of training steps.
-    # Check the PR https://github.com/huggingface/diffusers/pull/8312 for detailed explanation.
+    # 计算训练步数及学习率调度器相关的数学运算。
+    # 详细解释请查看 PR https://github.com/huggingface/diffusers/pull/8312。
     num_warmup_steps_for_scheduler = args.lr_warmup_steps * accelerator.num_processes
     if args.max_train_steps is None:
         len_train_dataloader_after_sharding = math.ceil(len(train_dataloader) / accelerator.num_processes)
@@ -304,18 +312,18 @@ def main(args):
         model = model._orig_mod if is_compiled_module(model) else model
         return model
 
-    ## register 
+    ## 注册保存与加载模型的钩子函数
     def save_model_hook(models, weights, output_dir):
         if accelerator.is_main_process:
             for model in models:    
                 if isinstance(unwrap_model(model), ControlNetModel):
                     model.save_pretrained(os.path.join(output_dir, 'controlnet'))
-                    accelerator.print("success save controlnet!")
+                    accelerator.print("成功保存 controlnet！")
                 elif isinstance(unwrap_model(model), Mix):
                     model.save_pretrained(os.path.join(output_dir, 'mix'))
-                    accelerator.print("success save id mix!")
+                    accelerator.print("成功保存 id mix！")
                 else:
-                    raise ValueError(f"unexpected save model: {model.__class__}")
+                    raise ValueError(f"遇到未预期的保存模型类型: {model.__class__}")
                 if weights:
                     weights.pop()
     def load_model_hook(models, input_dir):
@@ -323,26 +331,26 @@ def main(args):
             model = models.pop()
             if isinstance(unwrap_model(model), ControlNetModel):
                 model.from_pretrained(os.path.join(input_dir, 'controlnet'))
-                accelerator.print("success load controlnet!")
+                accelerator.print("成功加载 controlnet！")
             elif isinstance(unwrap_model(model), Mix):
                 model.from_pretrained(os.path.join(input_dir, 'mix'))
-                accelerator.print("success load id mix!")
+                accelerator.print("成功加载 id mix！")
             else:
-                raise ValueError(f"unexpected load model: {model.__class__}")
+                raise ValueError(f"遇到未预期的加载模型类型: {model.__class__}")
     accelerator.register_save_state_pre_hook(save_model_hook)
     accelerator.register_load_state_pre_hook(load_model_hook)
 
-    # We need to recalculate our total training steps as the size of the training dataloader may have changed.
+    # 由于训练数据加载器的大小可能已发生更改，我们需要重新计算总训练步数
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
     if args.max_train_steps is None:
         args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
         if num_training_steps_for_scheduler != args.max_train_steps * accelerator.num_processes:
             logger.warning(
-                f"The length of the 'train_dataloader' after 'accelerator.prepare' ({len(train_dataloader)}) does not match "
-                f"the expected length ({len_train_dataloader_after_sharding}) when the learning rate scheduler was created. "
-                f"This inconsistency may result in the learning rate scheduler not functioning properly."
+                f"经过 'accelerator.prepare' 处理后，'train_dataloader' 的长度 ({len(train_dataloader)}) "
+                f"与创建学习率调度器时的预期长度 ({len_train_dataloader_after_sharding}) 不符。"
+                f"这种不一致可能会导致学习率调度器无法正常运行。"
             )
-    # Afterwards we recalculate our number of training epochs
+    # 随后我们重新计算训练的 epoch 数量
     args.num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
     
     if accelerator.is_main_process:
@@ -350,21 +358,21 @@ def main(args):
         accelerator.init_trackers(args.exp_name, config=tracker_config)
 
 
-    # Train!
+    # 开始训练！
     total_batch_size = args.train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
 
-    logger.info("***** Running training *****")
-    logger.info(f"  Num examples = {len(train_dataset)}")
-    logger.info(f"  Num Epochs = {args.num_train_epochs}")
-    logger.info(f"  Instantaneous batch size per device = {args.train_batch_size}")
-    logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
-    logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
-    logger.info(f"  Total optimization steps = {args.max_train_steps}")
+    logger.info("***** 开始训练 *****")
+    logger.info(f"  样本数量 = {len(train_dataset)}")
+    logger.info(f"  Epoch 数量 = {args.num_train_epochs}")
+    logger.info(f"  每台设备的瞬时批次大小 = {args.train_batch_size}")
+    logger.info(f"  总训练批次大小 (包含并行、分布式和梯度累积) = {total_batch_size}")
+    logger.info(f"  梯度累积步数 = {args.gradient_accumulation_steps}")
+    logger.info(f"  总优化步数 = {args.max_train_steps}")
     
     if th.cuda.is_available():
         allocated = th.cuda.memory_allocated() / (1024 ** 3)
         reserved = th.cuda.memory_reserved() / (1024 ** 3)
-        logger.info(f"Before Training Loop GPU Memory: {allocated:.2f} GB Allocated, {reserved:.2f} GB Reserved")
+        logger.info(f"训练循环前 GPU 显存: 已分配 {allocated:.2f} GB, 已保留 {reserved:.2f} GB")
     global_step = 0
     first_epoch = 0
     initial_global_step = 0
@@ -372,8 +380,8 @@ def main(args):
     progress_bar = tqdm(
         range(0, args.max_train_steps),
         initial=initial_global_step,
-        desc="Steps",
-        # Only show the progress bar once on each machine.
+        desc="训练步数",
+        # 仅在每台机器的主进程上显示一次进度条。
         disable=not accelerator.is_local_main_process,
     )
 
@@ -381,19 +389,19 @@ def main(args):
         epoch_loss = 0.0
         for step, batch in enumerate(train_dataloader):
             with accelerator.accumulate(controlnet):
-                # Convert images to latent space
+                # 将图像转换为潜在空间表示（latents）
                 latents = vae.encode(batch["target"].to(dtype=weight_dtype)).latent_dist.sample()
                 latents = latents * vae.config.scaling_factor
 
-                # Sample noise that we'll add to the latents
+                # 采样要添加到 latents 中的噪声
                 noise = torch.randn_like(latents)
                 bsz = latents.shape[0]
         
-                # Sample a random timestep for each image
+                # 为每张图像采样一个随机的时间步
                 timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=latents.device)
                 timesteps = timesteps.long()
 
-                # Add noise to the latents according to the noise magnitude at each timestep
+                # 根据每个时间步的噪声幅度，将噪声添加到 latents 中（前向扩散过程）
                 noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
 
                 controlnet_image = batch["control"].to(dtype=weight_dtype)
@@ -432,13 +440,13 @@ def main(args):
                     return_dict=False,
                 )[0]
 
-                # Get the target for loss depending on the prediction type
+                # 根据预测类型获取计算损失的目标值
                 if noise_scheduler.config.prediction_type == "epsilon":
                     target = noise
                 elif noise_scheduler.config.prediction_type == "v_prediction":
                     target = noise_scheduler.get_velocity(latents, noise, timesteps)
                 else:
-                    raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
+                    raise ValueError(f"未知的预测类型 {noise_scheduler.config.prediction_type}")
                 
                 loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
                 accelerator.backward(loss)
@@ -446,20 +454,20 @@ def main(args):
                 lr_scheduler.step()
                 optimizer.zero_grad(set_to_none=True)
                 
-                # Explicitly empty CUDA cache to prevent fragmentation buildup
+                # 显式清空 CUDA 缓存，防止显存碎片堆积
                 if step % 100 == 0:
                     torch.cuda.empty_cache()
 
-            # Checks if the accelerator has performed an optimization step behind the scenes
+            # 检查加速器是否在后台执行了优化步骤（梯度同步完成）
             if accelerator.sync_gradients:
                 progress_bar.update(1)
                 global_step += 1
                 
-                # Add step-level memory log
+                # 添加步级别的显存日志
                 if global_step % 10 == 0 and th.cuda.is_available():
                     allocated = th.cuda.memory_allocated() / (1024 ** 3)
                     reserved = th.cuda.memory_reserved() / (1024 ** 3)
-                    logger.info(f"[Step {global_step}] GPU Memory: {allocated:.2f} GB Allocated, {reserved:.2f} GB Reserved")
+                    logger.info(f"[Step {global_step}] GPU 显存: 已分配 {allocated:.2f} GB, 已保留 {reserved:.2f} GB")
                 
                 # 修复卡死问题：所有进程必须同步等待保存操作
                 # 在 DeepSpeed 环境下，save_state() 是一个集体通信操作（Collective Operation），
