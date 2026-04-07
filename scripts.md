@@ -74,7 +74,7 @@ export HF_HOME="/data/weijianghong/.cache/huggingface"
 export TMPDIR="/data/weijianghong/tmp"
 mkdir -p $TRITON_CACHE_DIR $HF_HOME $TMPDIR
 
-CUDA_VISIBLE_DEVICES=1,2,3,4,5 accelerate launch --config_file deepspeed_config.yaml train.py \
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5 accelerate launch --config_file deepspeed_config.yaml train.py \
  --pretrained_model_name_or_path "/data/weijianghong/workspace/faceme2/models/RealVisXL_V3.0" \
  --mix_pretrained_path "None" \
  --output_dir "./output/train_results_deepspeed" \
@@ -82,9 +82,11 @@ CUDA_VISIBLE_DEVICES=1,2,3,4,5 accelerate launch --config_file deepspeed_config.
  --resolution 512 \
  --report_to "wandb" \
  --learning_rate 5e-5 \
- --train_batch_size 1 \
+ --lr_scheduler "cosine_with_restarts" \
+ --lr_warmup_steps 500 \
+ --train_batch_size 2 \
  --mixed_precision fp16 \
- --num_workers 4 \
+ --num_workers 8 \
  --gradient_accumulation_steps 1 \
  --num_train_epochs 100 \
  --checkpoint_steps 1000 \

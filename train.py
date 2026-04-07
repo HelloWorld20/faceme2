@@ -462,13 +462,19 @@ def main(args):
                     logger.info(f"[Step {global_step}] GPU Memory: {allocated:.2f} GB Allocated, {reserved:.2f} GB Reserved")
                 
                 # 修复卡死问题：所有进程必须同步等待保存操作
+                # 在 DeepSpeed 环境下，save_state() 是一个集体通信操作（Collective Operation），
+                # 所有的 GPU 进程都必须同时调用 accelerator.save_state() 才能把分散的显存权重合并收集起来。
+                # 绝对不能把它包裹在 `if accelerator.is_main_process:` 里面，否则其他卡就会在旁边死等。
                 if global_step % args.checkpoint_steps == 0:
                     accelerator.wait_for_everyone() # 确保所有卡都跑到这一步
+                    save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
+                    
+                    # ⚠️ DeepSpeed 下所有卡都必须参与 save_state 才能拼出完整的权重
+                    accelerator.save_state(save_path)
+                    
                     if accelerator.is_main_process:
-                        save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
-                        accelerator.save_state(save_path)
                         logger.info(f"Saved state to {save_path}")
-                    accelerator.wait_for_everyone() # 确保主进程保存完，其他进程再继续
+                    accelerator.wait_for_everyone() # 确保保存完大家再一起往下跑
 
              
 
