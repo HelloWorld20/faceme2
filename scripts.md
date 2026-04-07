@@ -67,6 +67,13 @@ CUDA_VISIBLE_DEVICES=1,2,3,4,5 accelerate launch --num_processes=5 train.py \
 
 # 注意：你需要先在服务器上安装 DeepSpeed： pip install deepspeed
 
+# 确保所有的缓存和临时文件都使用 /data/weijianghong 下的充足空间，避免 No space left on device 错误
+
+export TRITON_CACHE_DIR="/data/weijianghong/.triton/cache"
+export HF_HOME="/data/weijianghong/.cache/huggingface"
+export TMPDIR="/data/weijianghong/tmp"
+mkdir -p $TRITON_CACHE_DIR $HF_HOME $TMPDIR
+
 CUDA_VISIBLE_DEVICES=1,2,3,4,5 accelerate launch --config_file deepspeed_config.yaml train.py \
  --pretrained_model_name_or_path "/data/weijianghong/workspace/faceme2/models/RealVisXL_V3.0" \
  --mix_pretrained_path "None" \
@@ -78,7 +85,7 @@ CUDA_VISIBLE_DEVICES=1,2,3,4,5 accelerate launch --config_file deepspeed_config.
  --train_batch_size 1 \
  --mixed_precision fp16 \
  --num_workers 4 \
- --gradient_accumulation_steps 2 \
+ --gradient_accumulation_steps 1 \
  --num_train_epochs 100 \
  --checkpoint_steps 1000 \
  --max_train_samples 1000
