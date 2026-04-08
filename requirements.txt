@@ -9,4 +9,4 @@ peft==0.14.0
 opencv-python
 scipy==1.13.1
 wandb==0.19.0
-insightface
+insightfacetimm
