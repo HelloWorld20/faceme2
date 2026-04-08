@@ -175,16 +175,15 @@ def main(args):
     else:
         mix.requires_grad_(True)    
         
-    # === 部分冻结 ControlNet 以节省显存 ===
+    # === 完全冻结 ControlNet 以极致节省显存 ===
     controlnet.requires_grad_(False) # 先把全部参数冻结
     
-    # 只解冻 mid_block (中层) 和 controlnet_down_blocks (特征注入层)
-    # 冻结庞大的基础 down_blocks，大幅减少需要计算梯度的参数量
-    for name, param in controlnet.named_parameters():
-        if "mid_block" in name or "controlnet_down_blocks" in name:
-            param.requires_grad = True
+    # 由于 OOM 严重，目前完全冻结 ControlNet，仅训练 SwinIR（和可能的 Mix 模块）
+    # for name, param in controlnet.named_parameters():
+    #     if "mid_block" in name or "controlnet_down_blocks" in name:
+    #         param.requires_grad = True
             
-    logger.info("Partially frozen ControlNet: Only training mid_block and controlnet_down_blocks to save VRAM.")
+    logger.info("Fully frozen ControlNet: Only training SwinIR (and Mix) to aggressively save VRAM.")
     # ======================================
 
     # 如果 xformers 可用，则使用内存高效的注意力机制 (memory efficient attention)
@@ -205,8 +204,7 @@ def main(args):
     if args.gradient_checkpointing:
         unet.enable_gradient_checkpointing()
         controlnet.enable_gradient_checkpointing()
-        # Mix 模块不继承自 ModelMixin，因此不能直接调用 enable_gradient_checkpointing
-        logger.info("已启用梯度检查点 (Gradient Checkpointing)。")
+        logger.info("已对 unet 和 controlnet 启用梯度检查点 (以计算 SwinIR 的反向传播)。")
 
     # 如果 PyTorch >= 2.0 可用，尝试使用 torch.compile 进行加速
     try:
@@ -232,6 +230,7 @@ def main(args):
     unet.to(accelerator.device, dtype=weight_dtype)
     text_encoder_one.to(accelerator.device, dtype=weight_dtype)
     text_encoder_two.to(accelerator.device, dtype=weight_dtype)
+    controlnet.to(accelerator.device, dtype=weight_dtype)
     if args.mix_pretrained_path is not None:
         mix.to(accelerator.device, dtype=weight_dtype)
 
@@ -240,9 +239,9 @@ def main(args):
     arcface_loss.to(accelerator.device, dtype=weight_dtype)
 
     if args.mix_pretrained_path is not None:
-        params_to_optimize = itertools.chain(controlnet.parameters(), swinir.parameters())
+        params_to_optimize = filter(lambda p: p.requires_grad, itertools.chain(controlnet.parameters(), swinir.parameters()))
     else :
-        params_to_optimize = itertools.chain(controlnet.parameters(), mix.parameters(), swinir.parameters())
+        params_to_optimize = filter(lambda p: p.requires_grad, itertools.chain(controlnet.parameters(), mix.parameters(), swinir.parameters()))
         
     if args.use_8bit_adam:
         try:
@@ -317,12 +316,12 @@ def main(args):
 
     )
     if args.mix_pretrained_path is not None:
-        controlnet, swinir, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-            controlnet, swinir, optimizer, train_dataloader, lr_scheduler
+        swinir, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+            swinir, optimizer, train_dataloader, lr_scheduler
         )   
     else :   
-        controlnet, mix, swinir, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-            controlnet, mix, swinir, optimizer, train_dataloader, lr_scheduler
+        mix, swinir, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+            mix, swinir, optimizer, train_dataloader, lr_scheduler
         )
 
   
