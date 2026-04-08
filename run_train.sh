@@ -32,6 +32,8 @@ CUDA_VISIBLE_DEVICES=1,2,3,4,5 accelerate launch --num_processes=5 train.py \
  --num_train_epochs 100 \
  --checkpoint_steps 1000 \
  --max_train_samples 1000 \
+ --gradient_checkpointing \
+ --use_8bit_adam \
  --exp_name "faceme2_dual_branch"
 
 echo "Training command executed."
