@@ -520,8 +520,10 @@ def main(args):
                 beta_prod_t = 1 - alpha_prod_t
 
                 # 公式: pred_x0 = (noisy_latents - sqrt(1 - alpha) * noise_pred) / sqrt(alpha)
+                # 为防止除零错误，增加 eps
+                epsilon = 1e-8
                 if noise_scheduler.config.prediction_type == "epsilon":
-                    pred_original_sample = (noisy_latents - beta_prod_t ** (0.5) * model_pred) / alpha_prod_t ** (0.5)
+                    pred_original_sample = (noisy_latents - beta_prod_t ** (0.5) * model_pred) / (alpha_prod_t ** (0.5) + epsilon)
                 elif noise_scheduler.config.prediction_type == "v_prediction":
                     pred_original_sample = (alpha_prod_t**0.5) * noisy_latents - (beta_prod_t**0.5) * model_pred
                 
@@ -534,11 +536,35 @@ def main(args):
                 pred_images_norm = (pred_images / 2 + 0.5).clamp(0, 1)
                 gt_images_norm = (gt_images / 2 + 0.5).clamp(0, 1)
 
+                # 确保 tensor 不是 nan，如果是 nan 就填充为 0
+                if torch.isnan(pred_images_norm).any():
+                    if step == 0 and accelerator.is_main_process:
+                        logger.warning(f"Step {step}: pred_images_norm contains NaN!")
+                    pred_images_norm = torch.nan_to_num(pred_images_norm, nan=0.0)
+
                 loss_l1 = F.l1_loss(pred_images_norm, gt_images_norm)
-                loss_perceptual = perceptual_loss(pred_images_norm, gt_images_norm)
+                
+                # Perceptual loss 和 ArcFace loss 可能会因为全零或极端值导致 NaN，加入安全检查
+                try:
+                    loss_perceptual = perceptual_loss(pred_images_norm, gt_images_norm)
+                except Exception as e:
+                    if step == 0 and accelerator.is_main_process:
+                        logger.warning(f"Perceptual loss error: {e}")
+                    loss_perceptual = torch.tensor(0.0, device=latents.device, dtype=weight_dtype, requires_grad=True)
+                    
+                if torch.isnan(loss_perceptual) or torch.isinf(loss_perceptual):
+                    loss_perceptual = torch.tensor(0.0, device=latents.device, dtype=weight_dtype, requires_grad=True)
 
                 # 5. 计算 ArcFace Loss (身份分支的 Loss)
-                loss_id = arcface_loss(pred_images_norm, gt_images_norm)
+                try:
+                    loss_id = arcface_loss(pred_images_norm, gt_images_norm)
+                except Exception as e:
+                    if step == 0 and accelerator.is_main_process:
+                        logger.warning(f"ArcFace loss error: {e}")
+                    loss_id = torch.tensor(0.0, device=latents.device, dtype=weight_dtype, requires_grad=True)
+                    
+                if torch.isnan(loss_id) or torch.isinf(loss_id):
+                    loss_id = torch.tensor(0.0, device=latents.device, dtype=weight_dtype, requires_grad=True)
 
                 # 6. Loss 融合 (对应 Proposal 里的 λ 权重)
                 lambda_l1 = 1.0
@@ -558,7 +584,8 @@ def main(args):
                 if torch.isnan(total_loss) or torch.isinf(total_loss):
                     logger.error(f"WARNING: Loss is NaN or Inf at step {step} on Rank {accelerator.process_index}")
                     # 防止由于损失异常导致反向传播时梯度出现 NaN，从而引发 fp16 unscale 错误
-                    # total_loss = torch.zeros_like(total_loss, requires_grad=True)
+                    # 如果 loss 异常，用 requires_grad=True 的 0 张量替代，保证 backward 不报错
+                    total_loss = torch.tensor(0.0, device=latents.device, dtype=weight_dtype, requires_grad=True)
 
                 accelerator.backward(total_loss)
                 
