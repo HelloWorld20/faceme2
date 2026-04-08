@@ -91,6 +91,15 @@ def make_train_dataset(args, tokenizer, text_encoder):
 
     return train_dataset
 
+import gc
+import sys
+
+def log_vram(msg):
+    if torch.cuda.is_available():
+        allocated = torch.cuda.memory_allocated() / (1024 ** 3)
+        reserved = torch.cuda.memory_reserved() / (1024 ** 3)
+        print(f"[{msg}] VRAM Allocated: {allocated:.2f} GB, Reserved: {reserved:.2f} GB")
+
 def main(args):
 
     logging_dir = os.path.join(args.output_dir, "log")
@@ -115,6 +124,9 @@ def main(args):
         allocated = th.cuda.memory_allocated() / (1024 ** 3)
         reserved = th.cuda.memory_reserved() / (1024 ** 3)
         logger.info(f"Initial GPU Memory: {allocated:.2f} GB Allocated, {reserved:.2f} GB Reserved")
+
+    if accelerator.is_main_process:
+        log_vram("Before loading models")
 
     # 初始化分词器
     tokenizer_one = AutoTokenizer.from_pretrained(
@@ -141,6 +153,9 @@ def main(args):
     vae = AutoencoderKL.from_pretrained(args.pretrained_model_name_or_path, subfolder="vae",)
     unet = OriginalUNet2DConditionModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="unet", )
 
+    if accelerator.is_main_process:
+        log_vram("After loading base models (VAE, UNet, TextEncoders)")
+
     # 合并 photomaker 权重
     photomaker_path = "./models/photomaker-v1.bin"
     if not os.path.exists(photomaker_path):
@@ -162,6 +177,9 @@ def main(args):
     swinir = SwinIRQualityBranch()
     perceptual_loss = PerceptualLoss()
     arcface_loss = ArcFaceLoss()
+
+    if accelerator.is_main_process:
+        log_vram("After loading ControlNet, Mix, SwinIR, and Losses")
 
     vae.requires_grad_(False)
     vae.enable_slicing()
@@ -238,6 +256,9 @@ def main(args):
     perceptual_loss.to(accelerator.device, dtype=weight_dtype)
     arcface_loss.to(accelerator.device, dtype=weight_dtype)
 
+    if accelerator.is_main_process:
+        log_vram("Before optimizer creation")
+        
     if args.mix_pretrained_path is not None:
         params_to_optimize = filter(lambda p: p.requires_grad, itertools.chain(controlnet.parameters(), swinir.parameters()))
     else :
@@ -262,6 +283,9 @@ def main(args):
         weight_decay=1e-2,
         eps=1e-08,
     )
+    
+    if accelerator.is_main_process:
+        log_vram("After optimizer creation")
 
     train_dataset = make_train_dataset(args, [tokenizer_one, tokenizer_two], [text_encoder_one, text_encoder_two])
     # 自定义批处理合并函数 (collate_fn)
@@ -315,6 +339,9 @@ def main(args):
         num_training_steps=num_training_steps_for_scheduler,
 
     )
+    if accelerator.is_main_process:
+        log_vram("Before accelerator.prepare")
+        
     if args.mix_pretrained_path is not None:
         swinir, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
             swinir, optimizer, train_dataloader, lr_scheduler
@@ -323,6 +350,9 @@ def main(args):
         mix, swinir, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
             mix, swinir, optimizer, train_dataloader, lr_scheduler
         )
+
+    if accelerator.is_main_process:
+        log_vram("After accelerator.prepare")
 
   
     def unwrap_model(model):
@@ -412,6 +442,9 @@ def main(args):
     for epoch in range(first_epoch, args.num_train_epochs):
         epoch_loss = 0.0
         for step, batch in enumerate(train_dataloader):
+            if step == 0 and accelerator.is_main_process:
+                log_vram(f"Start of Epoch {epoch}, Step 0")
+                
             with accelerator.accumulate(controlnet):
                 # 将图像转换为潜在空间表示（latents）
                 latents = vae.encode(batch["target"].to(dtype=weight_dtype)).latent_dist.sample()
@@ -514,6 +547,10 @@ def main(args):
                 total_loss = loss_mse + lambda_l1 * loss_l1 + lambda_p * loss_perceptual + (lambda_id * time_weight) * loss_id
 
                 accelerator.backward(total_loss)
+                
+                if step == 0 and accelerator.is_main_process:
+                    log_vram(f"After Backward Pass Epoch {epoch}, Step 0")
+                    
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad(set_to_none=True)
