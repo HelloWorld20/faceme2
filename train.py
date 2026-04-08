@@ -572,9 +572,14 @@ def main(args):
                         total_norm_clipped = torch.norm(torch.stack([torch.norm(p.grad.detach(), 2) for p in params_to_optimize if p.grad is not None]), 2)
                         logger.info(f"Step {step}: Gradient norm after clipping: {total_norm_clipped.item()}")
                         
-                optimizer.step()
-                lr_scheduler.step()
-                optimizer.zero_grad(set_to_none=True)
+                # 无论是否 sync_gradients，optimizer.step 应该由 accelerator 管理，通常可以和 lr_scheduler.step() 一起放在 sync_gradients 内，
+                # 但更安全的做法是无论如何都调用它，让 accelerator 自己去判断内部的状态（特别是 DDP + 梯度累加的情况）。
+                # 然而，如果使用了梯度累加并且只有在 sync_gradients 时才执行梯度裁剪，那么 step() 也应该在 sync_gradients 时执行。
+                # 由于这是 DDP 训练，我们调整位置如下：
+                if accelerator.sync_gradients:
+                    optimizer.step()
+                    lr_scheduler.step()
+                    optimizer.zero_grad(set_to_none=True)
                 
                 # 显式清空 CUDA 缓存，防止显存碎片堆积
                 if step % 100 == 0:
