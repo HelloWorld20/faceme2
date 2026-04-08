@@ -586,19 +586,25 @@ def main(args):
                     logger.error(f"WARNING: Loss is NaN or Inf at step {step} on Rank {accelerator.process_index}")
                     # ==============================================================================================
                     # 关键修复: 如果 loss 是 NaN/Inf，我们不能返回 0.0 然后用它 backward！
-                    # 因为如果你用一个全新的、与计算图断开连接的 tensor(0.0) backward，
-                    # optimizer 里的那些参数（params_to_optimize）的 .grad 将保持为 None (或之前的状态)。
-                    # 当 DeepSpeed / AMP 尝试对这些参数做 unscale 时，由于有的参数连梯度都没有（或者说当前 step 根本没生成梯度），
-                    # 就会触发 AssertionError: No inf checks were recorded for this optimizer.
-                    #
-                    # 正确做法: 让它顺着计算图反向传播，但是用 0 乘以原始的 loss，
-                    # 这样梯度就能正常沿着图流回所有参数，并且数值被强行归零。
-                    # ==============================================================================================
+                    # 必须保证 backward 生成的梯度是有效的 dtype（即不会污染 fp16 的 scaler）。
+                    # 当模型参数是 fp16/bf16 时，用 * 0.0 可能会导致后续计算图出问题，
+                    # 更好的方式是用一个非常小的标量或者基于原始 loss scale 下来的 0 标量，并且手动清理异常梯度。
                     total_loss = total_loss * 0.0
 
                 # 使用 accelerator.backward
                 accelerator.backward(total_loss)
                 
+                # =========================== 关键修复：防止 FP16/BF16 下异常梯度触发 unscale 崩溃 ===========================
+                if loss_is_abnormal:
+                    # 如果 loss 是 NaN，反向传播后计算图中的部分/全部梯度也会变成 NaN。
+                    # 当 DeepSpeed / AMP 尝试 unscale 这些 NaN 梯度时，就会抛出 ValueError: Attempting to unscale FP16 gradients.
+                    # 或者 AssertionError: No inf checks were recorded for this optimizer.
+                    # 因此，我们需要手动将所有梯度置为 0，而不是让 scaler 去面对这些 NaN/Inf。
+                    for p in params_to_optimize:
+                        if p.grad is not None:
+                            # 直接把 NaN/Inf 的梯度替换为 0
+                            p.grad.data.nan_to_num_(nan=0.0, posinf=0.0, neginf=0.0)
+
                 if step == 0 and accelerator.is_main_process:
                     log_vram(f"After Backward Pass Epoch {epoch}, Step 0")
                     
