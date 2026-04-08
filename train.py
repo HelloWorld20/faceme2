@@ -460,11 +460,11 @@ def main(args):
                 timesteps = timesteps.long()
 
                 # 根据每个时间步的噪声幅度，将噪声添加到 latents 中（前向扩散过程）
-                noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
+                noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps).to(dtype=weight_dtype)
 
                 # SwinIR 质量分支：从模糊图像中提取纹理并修复
                 degraded_image = batch["control"].to(dtype=weight_dtype)
-                controlnet_image = swinir(degraded_image)
+                controlnet_image = swinir(degraded_image).to(dtype=weight_dtype)
                 
                 if 'prompt_embeds' in batch.keys():
                     id_prompt_embeds = batch['prompt_embeds'].to(dtype=weight_dtype)
@@ -478,8 +478,8 @@ def main(args):
                     id_prompt_embeds = torch.cat([pref, mix_emb, sufx] , dim=1)[:,:77,:]
                     id_prompt_embeds = id_prompt_embeds.to(dtype=weight_dtype)
                         
-                unet_added_conditions = {'text_embeds':batch['pooled_prompt_embeds'].to(dtype=weight_dtype), 'time_ids': batch['add_time_ids']}
-                
+                unet_added_conditions = {'text_embeds':batch['pooled_prompt_embeds'].to(dtype=weight_dtype), 'time_ids': batch['add_time_ids'].to(dtype=weight_dtype)}
+
                 down_block_res_samples, mid_block_res_sample = controlnet(
                     noisy_latents,
                     timesteps,
