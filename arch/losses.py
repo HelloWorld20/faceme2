@@ -2,8 +2,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchvision import models
-import os
-from arch.iresnet import Backbone
 
 class PerceptualLoss(nn.Module):
     def __init__(self):
@@ -37,49 +35,31 @@ class PerceptualLoss(nn.Module):
         return loss
 
 class ArcFaceLoss(nn.Module):
-    def __init__(self, pretrained_path=None):
+    def __init__(self, pretrained=True):
         super(ArcFaceLoss, self).__init__()
-        # Initialize the IR-SE50 backbone which is standard for ArcFace
-        # num_layers=50, drop_ratio=0.6, mode='ir_se'
-        self.resnet = Backbone(50, 0.6, 'ir_se')
-        
-        if pretrained_path is None:
-            # Default fallback path, you can replace it with your downloaded weights
-            pretrained_path = "models/model_ir_se50.pth"
-            pretrained_url = "https://github.com/TreB1eN/InsightFace_Pytorch/releases/download/1.0/model_ir_se50.pth"
-            os.makedirs("models", exist_ok=True)
-            if not os.path.exists(pretrained_path):
-                print(f"Downloading pre-trained ArcFace weights... (Note: this URL might be broken, please download manually if it fails)")
-                try:
-                    torch.hub.download_url_to_file(pretrained_url, pretrained_path)
-                except Exception as e:
-                    print(f"Warning: Failed to download ArcFace weights: {e}. Please download `model_ir_se50.pth` manually to {pretrained_path}")
-        
-        if os.path.exists(pretrained_path):
-            print(f"Loading ArcFace pre-trained weights from {pretrained_path}")
-            state_dict = torch.load(pretrained_path, map_location='cpu')
-            self.resnet.load_state_dict(state_dict, strict=False)
-        else:
-            print("Warning: No ArcFace pre-trained weights found. Using random weights.")
-            
+        # According to the proposal, ResNet-18 is used as the Identity Branch
+        # In practice, this should be loaded with ArcFace pre-trained weights on a face dataset (e.g. WebFace or MS1MV2)
+        self.resnet = models.resnet18(weights=models.ResNet18_Weights.DEFAULT if pretrained else None)
+        # Remove the classification head to get the 512-dim embedding
+        self.resnet.fc = nn.Identity()
         self.resnet.eval()
         for param in self.resnet.parameters():
             param.requires_grad = False
             
     def extract_features(self, x):
-        # The input x is assumed to be normalized in [0, 1] with shape (B, 3, H, W)
         # Interpolate to 112x112 which is standard for face recognition networks
         x = F.interpolate(x, size=(112, 112), mode='bilinear', align_corners=False)
-        # Standardize using mean=0.5, std=0.5 as required by InsightFace PyTorch models
-        x = (x - 0.5) / 0.5
+        # Assuming input is [0, 1], normalize with ImageNet stats (or face model stats if custom weights are loaded)
+        mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1).to(x.device)
+        std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1).to(x.device)
+        x = (x - mean) / std
         features = self.resnet(x)
-        # Normalize the embedding to unit length
-        features = F.normalize(features, p=2, dim=1)
-        return features
+        return F.normalize(features, p=2, dim=1)
 
     def forward(self, input_img, target_img):
+        # Compute cosine similarity between extracted ID features
         id_pred = self.extract_features(input_img)
         id_target = self.extract_features(target_img)
-        # Cosine distance loss: 1 - cosine_similarity
+        # Cosine distance: 1 - cosine_similarity
         loss = 1.0 - (id_pred * id_target).sum(dim=1).mean()
         return loss
