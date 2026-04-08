@@ -550,17 +550,32 @@ def main(args):
                 
                 total_loss = loss_mse + lambda_l1 * loss_l1 + lambda_p * loss_perceptual + (lambda_id * time_weight) * loss_id
 
+                # =========================== 新增: 损失异常检测日志 ===========================
+                if step == 0 and accelerator.is_main_process:
+                    logger.info(f"Step {step} Losses - MSE: {loss_mse.item():.4f}, L1: {loss_l1.item():.4f}, Perceptual: {loss_perceptual.item():.4f}, ID: {loss_id.item():.4f}")
+                    logger.info(f"Step {step} Total Loss: {total_loss.item():.4f}, is_nan: {torch.isnan(total_loss).item()}, is_inf: {torch.isinf(total_loss).item()}")
+                
+                if torch.isnan(total_loss) or torch.isinf(total_loss):
+                    logger.error(f"WARNING: Loss is NaN or Inf at step {step} on Rank {accelerator.process_index}")
+                    # 防止由于损失异常导致反向传播时梯度出现 NaN，从而引发 fp16 unscale 错误
+                    # total_loss = torch.zeros_like(total_loss, requires_grad=True)
+
                 accelerator.backward(total_loss)
                 
                 if step == 0 and accelerator.is_main_process:
                     log_vram(f"After Backward Pass Epoch {epoch}, Step 0")
                     
                 if accelerator.sync_gradients:
-                    # 检查是否有梯度
+                    # 检查是否有梯度，并打印梯度缩放器的状态
                     if step == 0 and accelerator.is_main_process:
                         has_grad = any(p.grad is not None for p in params_to_optimize)
                         logger.info(f"Step {step}: Has gradients before clipping: {has_grad}")
                         if has_grad:
+                            # 尝试找出是否有 NaN 梯度
+                            has_nan = any(torch.isnan(p.grad).any() for p in params_to_optimize if p.grad is not None)
+                            has_inf = any(torch.isinf(p.grad).any() for p in params_to_optimize if p.grad is not None)
+                            logger.info(f"Step {step}: Has NaN gradients: {has_nan}, Has Inf gradients: {has_inf}")
+                            
                             # 计算未裁剪前的梯度范数，以供对比
                             total_norm = torch.norm(torch.stack([torch.norm(p.grad.detach(), 2) for p in params_to_optimize if p.grad is not None]), 2)
                             logger.info(f"Step {step}: Gradient norm before clipping: {total_norm.item()}")
@@ -572,14 +587,12 @@ def main(args):
                         total_norm_clipped = torch.norm(torch.stack([torch.norm(p.grad.detach(), 2) for p in params_to_optimize if p.grad is not None]), 2)
                         logger.info(f"Step {step}: Gradient norm after clipping: {total_norm_clipped.item()}")
                         
-                # 无论是否 sync_gradients，optimizer.step 应该由 accelerator 管理，通常可以和 lr_scheduler.step() 一起放在 sync_gradients 内，
-                # 但更安全的做法是无论如何都调用它，让 accelerator 自己去判断内部的状态（特别是 DDP + 梯度累加的情况）。
-                # 然而，如果使用了梯度累加并且只有在 sync_gradients 时才执行梯度裁剪，那么 step() 也应该在 sync_gradients 时执行。
-                # 由于这是 DDP 训练，我们调整位置如下：
-                if accelerator.sync_gradients:
-                    optimizer.step()
-                    lr_scheduler.step()
-                    optimizer.zero_grad(set_to_none=True)
+                # 在使用 Accelerate 时，如果使用了梯度累加，optimizer.step 应该脱离 sync_gradients 判断，
+                # 因为 accelerator.accumulate() 上下文管理器会自动处理梯度的同步与否。
+                # 只有梯度裁剪应该在 sync_gradients 时进行。
+                optimizer.step()
+                lr_scheduler.step()
+                optimizer.zero_grad(set_to_none=True)
                 
                 # 显式清空 CUDA 缓存，防止显存碎片堆积
                 if step % 100 == 0:
