@@ -593,7 +593,7 @@ def main(args):
                     log_vram(f"After Backward Pass Epoch {epoch}, Step 0")
                     
                 if accelerator.sync_gradients:
-                    # 检查是否有梯度，并打印梯度缩放器的状态
+                    # =========================== 新增: 梯度信息日志 ===========================
                     if step == 0 and accelerator.is_main_process:
                         has_grad = any(p.grad is not None for p in params_to_optimize)
                         logger.info(f"Step {step}: Has gradients before clipping: {has_grad}")
@@ -606,7 +606,10 @@ def main(args):
                             # 计算未裁剪前的梯度范数，以供对比
                             total_norm = torch.norm(torch.stack([torch.norm(p.grad.detach(), 2) for p in params_to_optimize if p.grad is not None]), 2)
                             logger.info(f"Step {step}: Gradient norm before clipping: {total_norm.item()}")
-                    
+
+                    # 即使 total_loss 为0或者存在问题，accelerator 也需要正确维护 grad scaler
+                    # 通过确保 unscale_gradients 被调用来解决 AssertionError: No inf checks were recorded for this optimizer.
+                    accelerator.unscale_gradients(optimizer)
                     accelerator.clip_grad_norm_(params_to_optimize, args.max_grad_norm)
                     
                     if step == 0 and accelerator.is_main_process:
