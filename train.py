@@ -202,8 +202,11 @@ def main(args):
     else:
         logger.warning("xformers 不可用。请确保其已正确安装")
 
-    unet.enable_gradient_checkpointing()
-    controlnet.enable_gradient_checkpointing()
+    if args.gradient_checkpointing:
+        unet.enable_gradient_checkpointing()
+        controlnet.enable_gradient_checkpointing()
+        # Mix 模块不继承自 ModelMixin，因此不能直接调用 enable_gradient_checkpointing
+        logger.info("已启用梯度检查点 (Gradient Checkpointing)。")
 
     # 如果 PyTorch >= 2.0 可用，尝试使用 torch.compile 进行加速
     try:
@@ -241,13 +244,17 @@ def main(args):
     else :
         params_to_optimize = itertools.chain(controlnet.parameters(), mix.parameters(), swinir.parameters())
         
-    try:
-        import bitsandbytes as bnb
-        optimizer_class = bnb.optim.AdamW8bit
-        logger.info("使用 8-bit AdamW 优化器以节省显存。")
-    except ImportError:
+    if args.use_8bit_adam:
+        try:
+            import bitsandbytes as bnb
+            optimizer_class = bnb.optim.AdamW8bit
+            logger.info("使用 8-bit AdamW 优化器以节省显存。")
+        except ImportError:
+            optimizer_class = torch.optim.AdamW
+            logger.warning("bitsandbytes 不可用，回退到标准的 AdamW。")
+    else:
         optimizer_class = torch.optim.AdamW
-        logger.warning("bitsandbytes 不可用，使用标准的 AdamW。这会占用显著更多的显存。")
+        logger.info("使用标准的 AdamW 优化器。")
 
     optimizer = optimizer_class(
         params_to_optimize,
@@ -585,6 +592,8 @@ if __name__ == '__main__':
     parser.add_argument("--null_prompt_p", type=float, default=0.5)
     parser.add_argument("--exp_name", type=str, default="faceme")
     parser.add_argument("--max_train_samples", type=int, default=None, help="限制训练样本数量，用于快速测试")
+    parser.add_argument("--gradient_checkpointing", action="store_true", help="是否启用梯度检查点以节省显存")
+    parser.add_argument("--use_8bit_adam", action="store_true", help="是否使用 8-bit Adam 优化器以节省显存")
 
     
     args = parser.parse_args()
