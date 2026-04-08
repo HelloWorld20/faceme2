@@ -483,7 +483,7 @@ def main(args):
                     pred_original_sample = (alpha_prod_t**0.5) * noisy_latents - (beta_prod_t**0.5) * model_pred
                 
                 # 3. 通过 VAE 解码得到预测的 RGB 图像 (注意显存消耗)
-                pred_images = vae.decode(pred_original_sample / vae.config.scaling_factor).sample
+                pred_images = vae.decode(pred_original_sample.to(weight_dtype) / vae.config.scaling_factor).sample
                 gt_images = batch["target"].to(dtype=weight_dtype)
 
                 # 4. 计算 L1 和 Perceptual Loss (质量分支的 Loss)
