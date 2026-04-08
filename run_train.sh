@@ -22,13 +22,14 @@ CUDA_VISIBLE_DEVICES=1,2,3,4,5 accelerate launch --num_processes=5 train.py \
  --mix_pretrained_path "None" \
  --output_dir "./output/train_results" \
  --train_data_dir "output/train_json/train.json" \
- --resolution 256 \
+ --resolution 128 \
  --report_to "wandb" \
  --learning_rate 5e-5 \
+ --lr_scheduler "cosine_with_restarts" \
  --train_batch_size 1 \
  --mixed_precision fp16 \
- --num_workers 4 \
- --gradient_accumulation_steps 2 \
+ --num_workers 2 \
+ --gradient_accumulation_steps 4 \
  --num_train_epochs 100 \
  --checkpoint_steps 1000 \
  --max_train_samples 1000 \
