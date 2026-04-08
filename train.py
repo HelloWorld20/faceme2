@@ -79,6 +79,7 @@ def make_train_dataset(args, tokenizer, text_encoder):
     
     from dataset import FaceMeDataset
     train_dataset = FaceMeDataset(file_json=args.train_data_dir, 
+                                  resolution=args.resolution,
                                   prompt_embeds=prompt_embeds.squeeze(dim=0), 
                                   pooled_prompt_embeds=pooled_prompt_embeds.squeeze(dim=0), 
                                   tokens_one=tokens_one.squeeze(dim=0), 
@@ -174,7 +175,7 @@ def main(args):
     ###
 
     # 初始化 SwinIR 质量分支，以及 Perceptual Loss 和 ArcFace Loss
-    swinir = SwinIRQualityBranch()
+    swinir = SwinIRQualityBranch(use_checkpoint=args.gradient_checkpointing)
     perceptual_loss = PerceptualLoss()
     arcface_loss = ArcFaceLoss()
 

@@ -17,7 +17,7 @@ mkdir -p $XDG_CACHE_HOME
 
 echo "Starting FaceMe2 Optimized Training..."
 
-CUDA_VISIBLE_DEVICES=1,2,3,4,5 accelerate launch --num_processes=5 train.py \
+CUDA_VISIBLE_DEVICES=1,2,3,4,5 accelerate launch --num_processes=5 --mixed_precision="fp16" train.py \
  --pretrained_model_name_or_path "/data/weijianghong/workspace/faceme2/models/RealVisXL_V3.0" \
  --mix_pretrained_path "None" \
  --output_dir "./output/train_results" \

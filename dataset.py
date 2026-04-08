@@ -17,6 +17,7 @@ class FaceMeDataset(data.Dataset):
     def __init__(
         self,
         file_json: str, 
+        resolution: int = 128,
         prompt_embeds=None, 
         pooled_prompt_embeds=None, 
         tokens_one=None, 
@@ -34,6 +35,8 @@ class FaceMeDataset(data.Dataset):
         with open(file_json , 'rt') as f:
             for line in f:
                 self.data.append(json.loads(line))
+        
+        self.resolution = resolution
         
         # degradation configurations
         self.blur_kernel_size = blur_kernel_size
@@ -62,6 +65,7 @@ class FaceMeDataset(data.Dataset):
 
         img_gt = cv2.imread(gt_path)
         img_gt = cv2.cvtColor(img_gt, cv2.COLOR_BGR2RGB)
+        img_gt = cv2.resize(img_gt, (self.resolution, self.resolution), interpolation=cv2.INTER_AREA)
         
         # ------------------------ Sample Reference Image ------------------------ #
         ref_id_emb_list.append(gt_emb_path[0])

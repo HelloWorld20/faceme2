@@ -893,12 +893,12 @@ class SwinIR(nn.Module):
 
 
 class SwinIRQualityBranch(nn.Module):
-    def __init__(self, pretrained_path=None):
+    def __init__(self, pretrained_path=None, use_checkpoint=False):
         super(SwinIRQualityBranch, self).__init__()
         # SwinIR-M parameters for image restoration (upscale=1)
         self.model = SwinIR(upscale=1, in_chans=3, img_size=128, window_size=8,
                             img_range=1., depths=[6, 6, 6, 6, 6, 6], embed_dim=180, num_heads=[6, 6, 6, 6, 6, 6],
-                            mlp_ratio=2, upsampler='', resi_connection='1conv')
+                            mlp_ratio=2, upsampler='', resi_connection='1conv', use_checkpoint=use_checkpoint)
         
         if pretrained_path is None:
             # Note: This is an example URL, JingyunLiang's official weights might need to be downloaded from their releases
