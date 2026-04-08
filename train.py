@@ -23,6 +23,9 @@ from diffusers.utils.torch_utils import is_compiled_module
 from huggingface_hub import hf_hub_download
 from utils.load_photomaker import load_photomaker
 from arch.idencoder import Mix
+from arch.swinir import SwinIRQualityBranch
+from arch.losses import PerceptualLoss, ArcFaceLoss
+
 if is_wandb_available():
     pass
 
@@ -155,6 +158,11 @@ def main(args):
         mix.from_pretrained(args.mix_pretrained_path)
     ###
 
+    # 初始化 SwinIR 质量分支，以及 Perceptual Loss 和 ArcFace Loss
+    swinir = SwinIRQualityBranch()
+    perceptual_loss = PerceptualLoss()
+    arcface_loss = ArcFaceLoss()
+
     vae.requires_grad_(False)
     vae.enable_slicing()
     vae.enable_tiling()
@@ -224,10 +232,14 @@ def main(args):
     if args.mix_pretrained_path is not None:
         mix.to(accelerator.device, dtype=weight_dtype)
 
+    swinir.to(accelerator.device, dtype=weight_dtype)
+    perceptual_loss.to(accelerator.device, dtype=weight_dtype)
+    arcface_loss.to(accelerator.device, dtype=weight_dtype)
+
     if args.mix_pretrained_path is not None:
-        params_to_optimize = itertools.chain(controlnet.parameters())
+        params_to_optimize = itertools.chain(controlnet.parameters(), swinir.parameters())
     else :
-        params_to_optimize = itertools.chain(controlnet.parameters(), mix.parameters())
+        params_to_optimize = itertools.chain(controlnet.parameters(), mix.parameters(), swinir.parameters())
         
     try:
         import bitsandbytes as bnb
@@ -298,12 +310,12 @@ def main(args):
 
     )
     if args.mix_pretrained_path is not None:
-        controlnet, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-            controlnet, optimizer, train_dataloader, lr_scheduler
+        controlnet, swinir, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+            controlnet, swinir, optimizer, train_dataloader, lr_scheduler
         )   
     else :   
-        controlnet, mix, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-            controlnet, mix, optimizer, train_dataloader, lr_scheduler
+        controlnet, mix, swinir, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+            controlnet, mix, swinir, optimizer, train_dataloader, lr_scheduler
         )
 
   
@@ -322,6 +334,9 @@ def main(args):
                 elif isinstance(unwrap_model(model), Mix):
                     model.save_pretrained(os.path.join(output_dir, 'mix'))
                     accelerator.print("成功保存 id mix！")
+                elif isinstance(unwrap_model(model), SwinIRQualityBranch):
+                    torch.save(unwrap_model(model).state_dict(), os.path.join(output_dir, 'swinir.pth'))
+                    accelerator.print("成功保存 swinir！")
                 else:
                     raise ValueError(f"遇到未预期的保存模型类型: {model.__class__}")
                 if weights:
@@ -335,6 +350,9 @@ def main(args):
             elif isinstance(unwrap_model(model), Mix):
                 model.from_pretrained(os.path.join(input_dir, 'mix'))
                 accelerator.print("成功加载 id mix！")
+            elif isinstance(unwrap_model(model), SwinIRQualityBranch):
+                unwrap_model(model).load_state_dict(torch.load(os.path.join(input_dir, 'swinir.pth')))
+                accelerator.print("成功加载 swinir！")
             else:
                 raise ValueError(f"遇到未预期的加载模型类型: {model.__class__}")
     accelerator.register_save_state_pre_hook(save_model_hook)
@@ -404,7 +422,9 @@ def main(args):
                 # 根据每个时间步的噪声幅度，将噪声添加到 latents 中（前向扩散过程）
                 noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
 
-                controlnet_image = batch["control"].to(dtype=weight_dtype)
+                # SwinIR 质量分支：从模糊图像中提取纹理并修复
+                degraded_image = batch["control"].to(dtype=weight_dtype)
+                controlnet_image = swinir(degraded_image)
                 
                 if 'prompt_embeds' in batch.keys():
                     id_prompt_embeds = batch['prompt_embeds'].to(dtype=weight_dtype)
@@ -448,8 +468,46 @@ def main(args):
                 else:
                     raise ValueError(f"未知的预测类型 {noise_scheduler.config.prediction_type}")
                 
-                loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
-                accelerator.backward(loss)
+                # 1. 计算原始的扩散模型噪声 MSE Loss
+                loss_mse = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
+
+                # ----------------- 新增：反推 x0 并计算 Proposal 的 Fusion Loss -----------------
+                # 2. 从预测的噪声 (model_pred) 反推当前步预测的干净潜变量 (pred_x0)
+                alpha_prod_t = noise_scheduler.alphas_cumprod[timesteps].view(-1, 1, 1, 1).to(latents.device)
+                beta_prod_t = 1 - alpha_prod_t
+
+                # 公式: pred_x0 = (noisy_latents - sqrt(1 - alpha) * noise_pred) / sqrt(alpha)
+                if noise_scheduler.config.prediction_type == "epsilon":
+                    pred_original_sample = (noisy_latents - beta_prod_t ** (0.5) * model_pred) / alpha_prod_t ** (0.5)
+                elif noise_scheduler.config.prediction_type == "v_prediction":
+                    pred_original_sample = (alpha_prod_t**0.5) * noisy_latents - (beta_prod_t**0.5) * model_pred
+                
+                # 3. 通过 VAE 解码得到预测的 RGB 图像 (注意显存消耗)
+                pred_images = vae.decode(pred_original_sample / vae.config.scaling_factor).sample
+                gt_images = batch["target"].to(dtype=weight_dtype)
+
+                # 4. 计算 L1 和 Perceptual Loss (质量分支的 Loss)
+                # 将 [-1, 1] 的图像转换到 [0, 1]
+                pred_images_norm = (pred_images / 2 + 0.5).clamp(0, 1)
+                gt_images_norm = (gt_images / 2 + 0.5).clamp(0, 1)
+
+                loss_l1 = F.l1_loss(pred_images_norm, gt_images_norm)
+                loss_perceptual = perceptual_loss(pred_images_norm, gt_images_norm)
+
+                # 5. 计算 ArcFace Loss (身份分支的 Loss)
+                loss_id = arcface_loss(pred_images_norm, gt_images_norm)
+
+                # 6. Loss 融合 (对应 Proposal 里的 λ 权重)
+                lambda_l1 = 1.0
+                lambda_p = 1.0
+                lambda_id = 0.5 # 对应 RQ2 中的 λ Weight
+                
+                # 动态权重：在 timestep 很大（噪声大）时，反推的图像很模糊，计算 ID Loss 会造成干扰
+                time_weight = (1000 - timesteps.float().mean()) / 1000.0
+                
+                total_loss = loss_mse + lambda_l1 * loss_l1 + lambda_p * loss_perceptual + (lambda_id * time_weight) * loss_id
+
+                accelerator.backward(total_loss)
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad(set_to_none=True)
@@ -484,10 +542,15 @@ def main(args):
                         logger.info(f"Saved state to {save_path}")
                     accelerator.wait_for_everyone() # 确保保存完大家再一起往下跑
 
-             
-
-            logs = {"loss": loss.detach().item(),  "lr": lr_scheduler.get_last_lr()[0]}
-            epoch_loss += loss.detach().item()
+            logs = {
+                "loss": total_loss.detach().item(), 
+                "mse": loss_mse.detach().item(),
+                "l1": loss_l1.detach().item(),
+                "perceptual": loss_perceptual.detach().item(),
+                "id": loss_id.detach().item(),
+                "lr": lr_scheduler.get_last_lr()[0]
+            }
+            epoch_loss += total_loss.detach().item()
             
             progress_bar.set_postfix(**logs)
             accelerator.log(logs, step=global_step)
