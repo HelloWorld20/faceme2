@@ -261,9 +261,9 @@ def main(args):
         log_vram("Before optimizer creation")
         
     if args.mix_pretrained_path is not None:
-        params_to_optimize = filter(lambda p: p.requires_grad, itertools.chain(controlnet.parameters(), swinir.parameters()))
+        params_to_optimize = list(filter(lambda p: p.requires_grad, itertools.chain(controlnet.parameters(), swinir.parameters())))
     else :
-        params_to_optimize = filter(lambda p: p.requires_grad, itertools.chain(controlnet.parameters(), mix.parameters(), swinir.parameters()))
+        params_to_optimize = list(filter(lambda p: p.requires_grad, itertools.chain(controlnet.parameters(), mix.parameters(), swinir.parameters())))
         
     if args.use_8bit_adam:
         try:
@@ -287,6 +287,9 @@ def main(args):
     
     if accelerator.is_main_process:
         log_vram("After optimizer creation")
+        logger.info(f"Number of parameter groups to optimize: {len(params_to_optimize)}")
+        for i, p in enumerate(params_to_optimize[:5]): # 只打印前几个作为示例
+            logger.info(f"Param {i} shape: {p.shape}, requires_grad: {p.requires_grad}")
 
     train_dataset = make_train_dataset(args, [tokenizer_one, tokenizer_two], [text_encoder_one, text_encoder_two])
     # 自定义批处理合并函数 (collate_fn)
@@ -553,7 +556,22 @@ def main(args):
                     log_vram(f"After Backward Pass Epoch {epoch}, Step 0")
                     
                 if accelerator.sync_gradients:
-                    accelerator.clip_grad_norm_(controlnet.parameters(), args.max_grad_norm)
+                    # 检查是否有梯度
+                    if step == 0 and accelerator.is_main_process:
+                        has_grad = any(p.grad is not None for p in params_to_optimize)
+                        logger.info(f"Step {step}: Has gradients before clipping: {has_grad}")
+                        if has_grad:
+                            # 计算未裁剪前的梯度范数，以供对比
+                            total_norm = torch.norm(torch.stack([torch.norm(p.grad.detach(), 2) for p in params_to_optimize if p.grad is not None]), 2)
+                            logger.info(f"Step {step}: Gradient norm before clipping: {total_norm.item()}")
+                    
+                    accelerator.clip_grad_norm_(params_to_optimize, args.max_grad_norm)
+                    
+                    if step == 0 and accelerator.is_main_process:
+                        # 重新计算裁剪后的梯度范数
+                        total_norm_clipped = torch.norm(torch.stack([torch.norm(p.grad.detach(), 2) for p in params_to_optimize if p.grad is not None]), 2)
+                        logger.info(f"Step {step}: Gradient norm after clipping: {total_norm_clipped.item()}")
+                        
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad(set_to_none=True)
