@@ -552,6 +552,8 @@ def main(args):
                 if step == 0 and accelerator.is_main_process:
                     log_vram(f"After Backward Pass Epoch {epoch}, Step 0")
                     
+                if accelerator.sync_gradients:
+                    accelerator.clip_grad_norm_(controlnet.parameters(), args.max_grad_norm)
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad(set_to_none=True)
@@ -621,6 +623,7 @@ if __name__ == '__main__':
     parser.add_argument("--lr_warmup_steps", type=int, default=500)
     parser.add_argument("--lr_scheduler", type=str, default="constant",)    
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
+    parser.add_argument("--max_grad_norm", type=float, default=1.0)
     parser.add_argument("--mixed_precision", type=str, default="fp16")
     parser.add_argument("--seed", type=str, default=233)
     parser.add_argument("--num_workers", type=int, default=0)
