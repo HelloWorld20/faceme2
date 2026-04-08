@@ -581,12 +581,14 @@ def main(args):
                     logger.info(f"Step {step} Losses - MSE: {loss_mse.item():.4f}, L1: {loss_l1.item():.4f}, Perceptual: {loss_perceptual.item():.4f}, ID: {loss_id.item():.4f}")
                     logger.info(f"Step {step} Total Loss: {total_loss.item():.4f}, is_nan: {torch.isnan(total_loss).item()}, is_inf: {torch.isinf(total_loss).item()}")
                 
-                if torch.isnan(total_loss) or torch.isinf(total_loss):
+                loss_is_abnormal = torch.isnan(total_loss) or torch.isinf(total_loss)
+                if loss_is_abnormal:
                     logger.error(f"WARNING: Loss is NaN or Inf at step {step} on Rank {accelerator.process_index}")
                     # 防止由于损失异常导致反向传播时梯度出现 NaN，从而引发 fp16 unscale 错误
                     # 如果 loss 异常，用 requires_grad=True 的 0 张量替代，保证 backward 不报错
                     total_loss = torch.tensor(0.0, device=latents.device, dtype=weight_dtype, requires_grad=True)
 
+                # 使用 accelerator.backward
                 accelerator.backward(total_loss)
                 
                 if step == 0 and accelerator.is_main_process:
@@ -607,38 +609,18 @@ def main(args):
                             total_norm = torch.norm(torch.stack([torch.norm(p.grad.detach(), 2) for p in params_to_optimize if p.grad is not None]), 2)
                             logger.info(f"Step {step}: Gradient norm before clipping: {total_norm.item()}")
 
-                    # 只有当所有的梯度都不是 NaN 或 Inf 时，才调用 unscale 和 clip_grad_norm_
-                    # 如果我们强行把 total_loss 设为了 0（因为它本身计算出了 NaN），这里依然会有一些问题
-                    # 所以我们要判断，如果 total_loss_is_abnormal，我们甚至跳过 unscale 和 clip，直接不更新
-                    # 获取本 step 是否有异常的标记
-                    loss_is_abnormal = torch.isnan(total_loss) or torch.isinf(total_loss) or (total_loss.item() == 0.0 and step == 0) # 0.0 是我们强制赋的值
-                    
-                    if not loss_is_abnormal:
-                        # 只有在 loss 正常的情况下，才调用 clip_grad_norm_。
-                        # clip_grad_norm_ 内部会自动调用 accelerator.unscale_gradients()，所以我们不需要手动调用了，否则会报错 "unscale_() has already been called"
-                        accelerator.clip_grad_norm_(params_to_optimize, args.max_grad_norm)
+                    # 不再手动做异常跳过，否则会破坏 PyTorch DDP / Accelerate 的同步状态
+                    accelerator.clip_grad_norm_(params_to_optimize, args.max_grad_norm)
                         
-                        if step == 0 and accelerator.is_main_process:
-                            # 重新计算裁剪后的梯度范数
-                            total_norm_clipped = torch.norm(torch.stack([torch.norm(p.grad.detach(), 2) for p in params_to_optimize if p.grad is not None]), 2)
-                            logger.info(f"Step {step}: Gradient norm after clipping: {total_norm_clipped.item()}")
-                    else:
-                        if accelerator.is_main_process:
-                            logger.warning(f"Step {step}: Skipping gradient clipping because loss is abnormal.")
+                    if step == 0 and accelerator.is_main_process:
+                        # 重新计算裁剪后的梯度范数
+                        total_norm_clipped = torch.norm(torch.stack([torch.norm(p.grad.detach(), 2) for p in params_to_optimize if p.grad is not None]), 2)
+                        logger.info(f"Step {step}: Gradient norm after clipping: {total_norm_clipped.item()}")
 
                 # =========================== 优化器更新 ===========================
-                # 如果 loss 是 NaN，即使我们把它设为了 0 并 backward，梯度也可能是全 0，或者某些参数没梯度。
-                # 最好在 loss 异常时，跳过优化器的更新，这样 GradScaler 也不会报错。
-                loss_is_abnormal = torch.isnan(total_loss) or torch.isinf(total_loss) or (total_loss.item() == 0.0 and step == 0)
-                if not loss_is_abnormal:
-                    optimizer.step()
-                    lr_scheduler.step()
-                    optimizer.zero_grad(set_to_none=True)
-                else:
-                    # 如果异常，我们只清空梯度，不更新参数，直接进入下一步
-                    optimizer.zero_grad(set_to_none=True)
-                    if accelerator.is_main_process:
-                        logger.warning(f"Step {step}: Skipped optimizer.step() due to abnormal loss.")
+                optimizer.step()
+                lr_scheduler.step()
+                optimizer.zero_grad(set_to_none=True)
                 
                 # 显式清空 CUDA 缓存，防止显存碎片堆积
                 if step % 100 == 0:
