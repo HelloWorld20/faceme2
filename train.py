@@ -584,9 +584,17 @@ def main(args):
                 loss_is_abnormal = torch.isnan(total_loss) or torch.isinf(total_loss)
                 if loss_is_abnormal:
                     logger.error(f"WARNING: Loss is NaN or Inf at step {step} on Rank {accelerator.process_index}")
-                    # 防止由于损失异常导致反向传播时梯度出现 NaN，从而引发 fp16 unscale 错误
-                    # 如果 loss 异常，用 requires_grad=True 的 0 张量替代，保证 backward 不报错
-                    total_loss = torch.tensor(0.0, device=latents.device, dtype=weight_dtype, requires_grad=True)
+                    # ==============================================================================================
+                    # 关键修复: 如果 loss 是 NaN/Inf，我们不能返回 0.0 然后用它 backward！
+                    # 因为如果你用一个全新的、与计算图断开连接的 tensor(0.0) backward，
+                    # optimizer 里的那些参数（params_to_optimize）的 .grad 将保持为 None (或之前的状态)。
+                    # 当 DeepSpeed / AMP 尝试对这些参数做 unscale 时，由于有的参数连梯度都没有（或者说当前 step 根本没生成梯度），
+                    # 就会触发 AssertionError: No inf checks were recorded for this optimizer.
+                    #
+                    # 正确做法: 让它顺着计算图反向传播，但是用 0 乘以原始的 loss，
+                    # 这样梯度就能正常沿着图流回所有参数，并且数值被强行归零。
+                    # ==============================================================================================
+                    total_loss = total_loss * 0.0
 
                 # 使用 accelerator.backward
                 accelerator.backward(total_loss)
