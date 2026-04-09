@@ -175,7 +175,7 @@ def main(args):
     ###
 
     # 初始化 SwinIR 质量分支，以及 Perceptual Loss 和 ArcFace Loss
-    swinir = SwinIRQualityBranch(use_checkpoint=args.gradient_checkpointing)
+    swinir = SwinIRQualityBranch(use_checkpoint=False)
     perceptual_loss = PerceptualLoss()
     arcface_loss = ArcFaceLoss()
 
@@ -245,7 +245,7 @@ def main(args):
     elif accelerator.mixed_precision == "bf16":
         weight_dtype = torch.bfloat16
 
-    vae.to(accelerator.device, dtype=weight_dtype)
+    vae.to(accelerator.device, dtype=torch.float32)
     unet.to(accelerator.device, dtype=weight_dtype)
     text_encoder_one.to(accelerator.device, dtype=weight_dtype)
     text_encoder_two.to(accelerator.device, dtype=weight_dtype)
@@ -253,7 +253,8 @@ def main(args):
     if args.mix_pretrained_path is not None:
         mix.to(accelerator.device, dtype=weight_dtype)
 
-    swinir.to(accelerator.device, dtype=weight_dtype)
+    # SwinIR is very prone to NaN in FP16, keep it in FP32
+    swinir.to(accelerator.device, dtype=torch.float32)
     perceptual_loss.to(accelerator.device, dtype=weight_dtype)
     arcface_loss.to(accelerator.device, dtype=weight_dtype)
 
@@ -453,11 +454,9 @@ def main(args):
                 # 将图像转换为潜在空间表示（latents）
                 # 注意: SDXL VAE 在 fp16 下非常容易输出 NaN，因此强制在 fp32 下运行 VAE encode
                 target_fp32 = batch["target"].to(dtype=torch.float32)
-                vae.to(torch.float32)
                 latents = vae.encode(target_fp32).latent_dist.sample()
                 latents = latents * vae.config.scaling_factor
                 latents = latents.to(dtype=weight_dtype)
-                vae.to(weight_dtype) # 恢复原来的 dtype 以节省显存
 
                 # 采样要添加到 latents 中的噪声
                 noise = torch.randn_like(latents)
@@ -472,8 +471,23 @@ def main(args):
 
                 # SwinIR 质量分支：从模糊图像中提取纹理并修复
                 degraded_image = batch["control"].to(dtype=weight_dtype)
-                controlnet_image = swinir(degraded_image).to(dtype=weight_dtype)
                 
+                # SwinIR requires input in [0, 1], but degraded_image is in [-1, 1]
+                swinir_input = (degraded_image.to(torch.float32) + 1.0) / 2.0
+                
+                # Check swinir weight dtype
+                if step == 0:
+                    print(f"SwinIR conv_first weight dtype: {swinir.module.model.conv_first.weight.dtype if hasattr(swinir, 'module') else swinir.model.conv_first.weight.dtype}", flush=True)
+
+                controlnet_image_fp32 = swinir(swinir_input)
+                # Scale output back to [-1, 1] for ControlNet and Loss
+                controlnet_image_fp32 = controlnet_image_fp32 * 2.0 - 1.0
+                
+                controlnet_image = controlnet_image_fp32.to(dtype=weight_dtype)
+                
+                if step == 0 and accelerator.is_main_process:
+                    logger.warning(f"Step {step} - controlnet_image contains NaN: {torch.isnan(controlnet_image).any().item()}")
+
                 if 'prompt_embeds' in batch.keys():
                     id_prompt_embeds = batch['prompt_embeds'].to(dtype=weight_dtype)
                 else :
@@ -496,6 +510,7 @@ def main(args):
                     controlnet_cond=controlnet_image,
                     return_dict=False,
                 )
+                
                 model_pred = unet(
                     noisy_latents,
                     timesteps,
@@ -533,10 +548,8 @@ def main(args):
                     pred_original_sample = (alpha_prod_t**0.5) * noisy_latents - (beta_prod_t**0.5) * model_pred
                 
                 # 3. 通过 VAE 解码得到预测的 RGB 图像 (注意显存消耗)
-                vae.to(torch.float32)
                 pred_images = vae.decode((pred_original_sample / vae.config.scaling_factor).to(torch.float32)).sample
                 pred_images = pred_images.to(weight_dtype)
-                vae.to(weight_dtype)
                 gt_images = batch["target"].to(dtype=weight_dtype)
 
                 # 4. 计算 L1 和 Perceptual Loss (质量分支的 Loss)
@@ -586,8 +599,11 @@ def main(args):
 
                 # =========================== 新增: 损失异常检测日志 ===========================
                 if step == 0 and accelerator.is_main_process:
-                    logger.info(f"Step {step} Losses - MSE: {loss_mse.item():.4f}, L1: {loss_l1.item():.4f}, Perceptual: {loss_perceptual.item():.4f}, ID: {loss_id.item():.4f}")
-                    logger.info(f"Step {step} Total Loss: {total_loss.item():.4f}, is_nan: {torch.isnan(total_loss).item()}, is_inf: {torch.isinf(total_loss).item()}")
+                    logger.warning(f"Step {step} - model_pred contains NaN: {torch.isnan(model_pred).any().item()}")
+                    logger.warning(f"Step {step} - pred_original_sample contains NaN: {torch.isnan(pred_original_sample).any().item()}")
+                    logger.warning(f"Step {step} - pred_images contains NaN: {torch.isnan(pred_images).any().item()}")
+                    logger.warning(f"Step {step} Losses - MSE: {loss_mse.item():.4f}, L1: {loss_l1.item():.4f}, Perceptual: {loss_perceptual.item():.4f}, ID: {loss_id.item():.4f}")
+                    logger.warning(f"Step {step} Total Loss: {total_loss.item():.4f}, is_nan: {torch.isnan(total_loss).item()}, is_inf: {torch.isinf(total_loss).item()}")
                 
                 loss_is_abnormal = torch.isnan(total_loss) or torch.isinf(total_loss)
                 if loss_is_abnormal:
@@ -683,18 +699,24 @@ def main(args):
                         logger.info(f"Saved state to {save_path}")
                     accelerator.wait_for_everyone() # 确保保存完大家再一起往下跑
 
+            # 安全地获取 loss 的 item，防止 NaN 崩溃
+            def safe_item(tensor):
+                return tensor.detach().item() if tensor is not None else 0.0
+
             logs = {
-                "loss": total_loss.detach().item(), 
-                "mse": loss_mse.detach().item(),
-                "l1": loss_l1.detach().item(),
-                "perceptual": loss_perceptual.detach().item(),
-                "id": loss_id.detach().item(),
+                "loss": safe_item(total_loss), 
+                "mse": safe_item(loss_mse),
+                "l1": safe_item(loss_l1),
+                "perceptual": safe_item(loss_perceptual),
+                "id": safe_item(loss_id),
                 "lr": lr_scheduler.get_last_lr()[0]
             }
-            epoch_loss += total_loss.detach().item()
+            epoch_loss += safe_item(total_loss)
             
             progress_bar.set_postfix(**logs)
             accelerator.log(logs, step=global_step)
+
+            # (Debug exit removed)
 
             if global_step >= args.max_train_steps:
                 break

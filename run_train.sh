@@ -20,7 +20,7 @@ conda activate wei310 || true
 
 echo "Starting FaceMe2 Optimized Training..."
 
-CUDA_VISIBLE_DEVICES=1,2,3,4,5 accelerate launch --num_processes=5 --mixed_precision="fp16" train.py \
+CUDA_VISIBLE_DEVICES=1 accelerate launch --num_processes=1 --mixed_precision="fp16" train.py \
  --pretrained_model_name_or_path "/data/weijianghong/workspace/faceme2/models/RealVisXL_V3.0" \
  --mix_pretrained_path "None" \
  --output_dir "./output/train_results" \
@@ -38,5 +38,5 @@ CUDA_VISIBLE_DEVICES=1,2,3,4,5 accelerate launch --num_processes=5 --mixed_preci
  --gradient_checkpointing \
  --use_8bit_adam \
  --exp_name "faceme2_dual_branch" \
- --max_train_samples 1055 \
- > train_log.txt 2>&1 &
+ --max_train_samples 1055
+

@@ -83,7 +83,8 @@ class SwinIRQualityBranch(nn.Module):
             self.model.load_state_dict(pretrained_dict, strict=True)
             
     def forward(self, x):
-        return self.model(x)
+        with torch.autocast("cuda", enabled=False):
+            return self.model(x.to(torch.float32))
 
 
 def window_reverse(windows, window_size, H, W):
@@ -834,8 +835,8 @@ class SwinIR(nn.Module):
         if self.ape:
             x = x + self.absolute_pos_embed
         x = self.pos_drop(x)
-
-        for layer in self.layers:
+        
+        for i, layer in enumerate(self.layers):
             x = layer(x, x_size)
 
         x = self.norm(x)  # B L C
@@ -844,41 +845,44 @@ class SwinIR(nn.Module):
         return x
 
     def forward(self, x):
-        H, W = x.shape[2:]
-        x = self.check_image_size(x)
-        
-        self.mean = self.mean.type_as(x)
-        x = (x - self.mean) * self.img_range
+        with torch.autocast("cuda", enabled=False):
+            x = x.to(torch.float32)
+            H, W = x.shape[2:]
+            x = self.check_image_size(x)
+            
+            self.mean = self.mean.type_as(x)
+            x = (x - self.mean) * self.img_range
 
-        if self.upsampler == 'pixelshuffle':
-            # for classical SR
-            x = self.conv_first(x)
-            x = self.conv_after_body(self.forward_features(x)) + x
-            x = self.conv_before_upsample(x)
-            x = self.conv_last(self.upsample(x))
-        elif self.upsampler == 'pixelshuffledirect':
-            # for lightweight SR
-            x = self.conv_first(x)
-            x = self.conv_after_body(self.forward_features(x)) + x
-            x = self.upsample(x)
-        elif self.upsampler == 'nearest+conv':
-            # for real-world SR
-            x = self.conv_first(x)
-            x = self.conv_after_body(self.forward_features(x)) + x
-            x = self.conv_before_upsample(x)
-            x = self.lrelu(self.conv_up1(torch.nn.functional.interpolate(x, scale_factor=2, mode='nearest')))
-            if self.upscale == 4:
-                x = self.lrelu(self.conv_up2(torch.nn.functional.interpolate(x, scale_factor=2, mode='nearest')))
-            x = self.conv_last(self.lrelu(self.conv_hr(x)))
-        else:
-            # for image denoising and JPEG compression artifact reduction
-            x_first = self.conv_first(x)
-            res = self.conv_after_body(self.forward_features(x_first)) + x_first
-            x = x + self.conv_last(res)
+            if self.upsampler == 'pixelshuffle':
+                # for classical SR
+                x = self.conv_first(x)
+                x = self.conv_after_body(self.forward_features(x)) + x
+                x = self.conv_before_upsample(x)
+                x = self.conv_last(self.upsample(x))
+            elif self.upsampler == 'pixelshuffledirect':
+                # for lightweight SR
+                x = self.conv_first(x)
+                x = self.conv_after_body(self.forward_features(x)) + x
+                x = self.upsample(x)
+            elif self.upsampler == 'nearest+conv':
+                # for real-world SR
+                x = self.conv_first(x)
+                x = self.conv_after_body(self.forward_features(x)) + x
+                x = self.conv_before_upsample(x)
+                x = self.lrelu(self.conv_up1(torch.nn.functional.interpolate(x, scale_factor=2, mode='nearest')))
+                if self.upscale == 4:
+                    x = self.lrelu(self.conv_up2(torch.nn.functional.interpolate(x, scale_factor=2, mode='nearest')))
+                x = self.conv_last(self.lrelu(self.conv_hr(x)))
+            else:
+                # for image denoising and JPEG compression artifact reduction
+                x_first = self.conv_first(x)
+                feat = self.forward_features(x_first)
+                res = self.conv_after_body(feat) + x_first
+                x = x + self.conv_last(res)
 
-        x = x / self.img_range + self.mean
+            x = x / self.img_range + self.mean
 
-        return x[:, :, :H*self.upscale, :W*self.upscale]
+            return x[:, :, :H*self.upscale, :W*self.upscale]
 
     def flops(self):
         flops = 0
