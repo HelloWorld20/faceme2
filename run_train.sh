@@ -15,6 +15,9 @@ mkdir -p $TORCH_HOME
 mkdir -p $HF_HOME
 mkdir -p $XDG_CACHE_HOME
 
+source /data/weijianghong/etc/profile.d/conda.sh || true
+conda activate wei310 || true
+
 echo "Starting FaceMe2 Optimized Training..."
 
 CUDA_VISIBLE_DEVICES=1,2,3,4,5 accelerate launch --num_processes=5 --mixed_precision="fp16" train.py \
@@ -28,13 +31,12 @@ CUDA_VISIBLE_DEVICES=1,2,3,4,5 accelerate launch --num_processes=5 --mixed_preci
  --lr_scheduler "cosine_with_restarts" \
  --train_batch_size 1 \
  --mixed_precision fp16 \
- --num_workers 2 \
+ --num_workers 4 \
  --gradient_accumulation_steps 4 \
  --num_train_epochs 100 \
  --checkpoint_steps 1000 \
- --max_train_samples 1000 \
  --gradient_checkpointing \
  --use_8bit_adam \
- --exp_name "faceme2_dual_branch"
-
-echo "Training command executed."
+ --exp_name "faceme2_dual_branch" \
+ --max_train_samples 1055 \
+ > train_log.txt 2>&1 &

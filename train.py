@@ -451,8 +451,13 @@ def main(args):
                 
             with accelerator.accumulate(controlnet):
                 # 将图像转换为潜在空间表示（latents）
-                latents = vae.encode(batch["target"].to(dtype=weight_dtype)).latent_dist.sample()
+                # 注意: SDXL VAE 在 fp16 下非常容易输出 NaN，因此强制在 fp32 下运行 VAE encode
+                target_fp32 = batch["target"].to(dtype=torch.float32)
+                vae.to(torch.float32)
+                latents = vae.encode(target_fp32).latent_dist.sample()
                 latents = latents * vae.config.scaling_factor
+                latents = latents.to(dtype=weight_dtype)
+                vae.to(weight_dtype) # 恢复原来的 dtype 以节省显存
 
                 # 采样要添加到 latents 中的噪声
                 noise = torch.randn_like(latents)
@@ -528,7 +533,10 @@ def main(args):
                     pred_original_sample = (alpha_prod_t**0.5) * noisy_latents - (beta_prod_t**0.5) * model_pred
                 
                 # 3. 通过 VAE 解码得到预测的 RGB 图像 (注意显存消耗)
-                pred_images = vae.decode(pred_original_sample.to(weight_dtype) / vae.config.scaling_factor).sample
+                vae.to(torch.float32)
+                pred_images = vae.decode((pred_original_sample / vae.config.scaling_factor).to(torch.float32)).sample
+                pred_images = pred_images.to(weight_dtype)
+                vae.to(weight_dtype)
                 gt_images = batch["target"].to(dtype=weight_dtype)
 
                 # 4. 计算 L1 和 Perceptual Loss (质量分支的 Loss)
@@ -589,7 +597,7 @@ def main(args):
                     # 必须保证 backward 生成的梯度是有效的 dtype（即不会污染 fp16 的 scaler）。
                     # 当模型参数是 fp16/bf16 时，用 * 0.0 可能会导致后续计算图出问题，
                     # 更好的方式是用一个非常小的标量或者基于原始 loss scale 下来的 0 标量，并且手动清理异常梯度。
-                    total_loss = total_loss * 0.0
+                    total_loss = torch.tensor(0.0, device=latents.device, dtype=weight_dtype, requires_grad=True)
 
                 # 使用 accelerator.backward
                 accelerator.backward(total_loss)
@@ -623,17 +631,26 @@ def main(args):
                             total_norm = torch.norm(torch.stack([torch.norm(p.grad.detach(), 2) for p in params_to_optimize if p.grad is not None]), 2)
                             logger.info(f"Step {step}: Gradient norm before clipping: {total_norm.item()}")
 
-                    # 不再手动做异常跳过，否则会破坏 PyTorch DDP / Accelerate 的同步状态
-                    accelerator.clip_grad_norm_(params_to_optimize, args.max_grad_norm)
+                    # 修复 ValueError: Attempting to unscale FP16 gradients.
+                    if loss_is_abnormal:
+                        # 对于 NaN loss 导致的异常，我们需要完全清空梯度，跳过这一步的优化
+                        optimizer.zero_grad(set_to_none=True)
+                    else:
+                        accelerator.clip_grad_norm_(params_to_optimize, args.max_grad_norm)
                         
                     if step == 0 and accelerator.is_main_process:
                         # 重新计算裁剪后的梯度范数
-                        total_norm_clipped = torch.norm(torch.stack([torch.norm(p.grad.detach(), 2) for p in params_to_optimize if p.grad is not None]), 2)
-                        logger.info(f"Step {step}: Gradient norm after clipping: {total_norm_clipped.item()}")
+                        grads_after = [torch.norm(p.grad.detach(), 2) for p in params_to_optimize if p.grad is not None]
+                        if len(grads_after) > 0:
+                            total_norm_clipped = torch.norm(torch.stack(grads_after), 2)
+                            logger.info(f"Step {step}: Gradient norm after clipping: {total_norm_clipped.item()}")
+                        else:
+                            logger.info(f"Step {step}: Gradient norm after clipping: 0.0 (No gradients)")
 
                 # =========================== 优化器更新 ===========================
-                optimizer.step()
-                lr_scheduler.step()
+                if not loss_is_abnormal:
+                    optimizer.step()
+                    lr_scheduler.step()
                 optimizer.zero_grad(set_to_none=True)
                 
                 # 显式清空 CUDA 缓存，防止显存碎片堆积

@@ -1,5 +1,9 @@
 __pycache__/
 data/CelebHQRefForRelease/
 data/CelebHQRefForRelease.tar
+data/CelebHQ
+output/
 RealVisXL_V3.0/
 RealVisXL_V3.0.zip
+wandb/
+models/

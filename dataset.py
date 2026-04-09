@@ -86,10 +86,18 @@ class FaceMeDataset(data.Dataset):
         ref_id_embs = []
         ref_clip_embs = []
         for id_emb_path, clip_emb_path in ref_emb_path:
-            id_emb = torch.from_numpy(np.load(id_emb_path)).requires_grad_(False)
-            clip_emb = torch.from_numpy(np.load(clip_emb_path)).requires_grad_(False)
+            try:
+                id_emb = torch.from_numpy(np.load(id_emb_path)).requires_grad_(False)
+                clip_emb = torch.from_numpy(np.load(clip_emb_path)).requires_grad_(False)
+            except FileNotFoundError:
+                # print(f"Warning: Missing embeddings for {id_emb_path} or {clip_emb_path}. Using zero embeddings.")
+                id_emb = torch.zeros((1, 512), dtype=torch.float32).requires_grad_(False) # ArcFace emb size
+                clip_emb = torch.zeros((1, 2048), dtype=torch.float32).requires_grad_(False) # CLIP emb size
+                
             if id_emb.ndimension() == 1:
                 id_emb = id_emb.unsqueeze(dim=0)
+            if clip_emb.ndimension() == 1:
+                clip_emb = clip_emb.unsqueeze(dim=0)
             ref_id_embs.append(id_emb)
             ref_clip_embs.append(clip_emb)
     
