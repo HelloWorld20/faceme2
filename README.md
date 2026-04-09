@@ -1,214 +1,77 @@
-# :fire: FaceMe: Robust Blind Face Restoration With Personal Identification (AAAI2025)
+# FaceMe2: Dual-Branch MVP for Blind Face Restoration
 
-<a href='https://arxiv.org/abs/2501.05177'><img src='https://img.shields.io/badge/Paper-arxiv-b31b1b.svg'></a> &nbsp;&nbsp;
-<a href='https://modyu-liu.github.io/FaceMe_Homepage/'><img src='https://img.shields.io/badge/Project page-FaceMe-1bb41b.svg'></a> &nbsp;&nbsp;
-<a href='https://huggingface.co/datasets/thomas2modyu/FaceMe'><img src='https://img.shields.io/badge/Dataset-huggingface-ffff00.svg'></a> &nbsp;&nbsp;
-<!-- <a href=''><img src='https://img.shields.io/badge/Demo-huggingface-ffd700.svg'></a> &nbsp;&nbsp; -->
+本项目是基于 AAAI 2025 论文 **FaceMe** 的简化与改进版本（SDSC 8016 课程项目）。
 
-
-
-This is the official PyTorch codes for the paper:
-
->**FaceMe: Robust Blind Face Restoration With Personal Identification**<br>  [Siyu Liu<sup>1,*</sup>](https://github.com/modyu-liu), [Zhengpeng Duan<sup>1,*</sup>](https://adam-duan.github.io/), [Jia OuYang<sup>3</sup>](), [Jiayi Fu<sup>1</sup>](), [Hyunhee Park<sup>4</sup>](), [Zikun Liu<sup>3</sup>](), [Chunle Guo<sup>1,2,&dagger;</sup>](https://scholar.google.com/citations?user=RZLYwR0AAAAJ&hl=en), [Chongyi Li<sup>1,2</sup>](https://li-chongyi.github.io/) <br>
-> <sup>1</sup> VCIP, CS, Nankai University, <sup>2</sup> NKIARI, Shenzhen Futian, <sup>3</sup> Samsung Research, China, Beijing (SRC-B), <sup>4</sup> The Department of Camera Innovation Group, Samsung Electronics
-> <sup>*</sup>Denotes equal contribution, <sup>&dagger;</sup>Corresponding author.
-
-![teaser_img](.assets/teaser.png)
-
-
-:star: If FaceMe is helpful to your images or projects, please help star this repo. Thank you! :point_left:
+## 🔗 原版相关链接 (Original References)
+- **原始代码仓库**: [modyu-liu/FaceMe](https://github.com/modyu-liu/FaceMe)
+- **原始论文**: [FaceMe: Robust Blind Face Restoration with Personal Identification](https://arxiv.org/abs/2501.05177)
 
 ---
 
-## :boom: News
+## 🎯 项目现状与目标 (Project Overview & Status)
+原始的 FaceMe 使用了 Diffusion 模型和 ControlNet 等较为复杂的结构。为了提升训练与推理效率，同时满足资源限制要求，本项目将其核心思想提取并重构为一个 **双分支 MVP (Dual-Branch MVP)** 架构。
 
-- **2024.12.27** Create this repo and release related code of our paper.
+目前，项目已经成功跑通了基于该新架构的核心训练代码，修复了混合精度训练 (FP16/FP32) 的显存报错，并支持了自定义训练集规模等功能。
 
-## :runner: TODO
-- [ ] Launch an online demo
-- [x] Release Checkpoints
-- [x] Release the reference images of Wider-Test/LFW-Test/WebPhoto-Test we used 
-- [x] Release FFHQRef dataset 
-- [x] Release training and inference code
+### 🧩 运行流水线与核心架构 (Running Pipeline)
+模型主要由两个并行的分支构成：
+1. **质量分支 (Quality Branch)**:
+   - **核心模型**: SwinIR
+   - **功能**: 负责从严重退化的低质量 (LQ) 输入图像中恢复出高质量的高频细节和纹理。
+   - **损失函数**: 采用 L1 Loss + Perceptual Loss (感知损失) 来确保生成图像的整体视觉质量。
+2. **身份分支 (Identity Branch)**:
+   - **核心模型**: ResNet-18 (作为身份特征编码器)
+   - **功能**: 提取并约束生成图像与原始高质量图像之间的面部身份特征一致性。
+   - **损失函数**: 采用 ArcFace Loss (Identity Loss) 防止生成人脸出现“不像本人”的问题。
+3. **训练策略**:
+   - 整体采用 **3 阶段交替训练策略 (3-phase alternating strategy)**，在不同的阶段动态调整各个分支的损失权重，最终达到图像重建质量与身份保真度的最佳平衡。
 
+---
 
-## :wrench: Dependencies and Installation
+## 📊 数据集 (Dataset)
+- **基础数据**: 训练主要基于 **CelebA-HQ** 或 **FFHQ** 等高质量人脸数据集。
+- **动态退化 (Dynamic Degradation)**: 在数据加载时 (`dataset.py`)，我们通过实时加入随机模糊 (Blur)、降采样 (Downsample)、噪声 (Noise) 和 JPEG 压缩等手段，动态生成对应的低质量 (LQ) 输入。
+- **身份特征预处理**: 在训练之前，需预先提取图像的 ID Embedding 和 CLIP Embedding (以 `.npy` 格式保存)，通过 `train.json` 进行管理和读取。
 
-1. Clone repo
+---
+
+## 🚀 运行步骤 (How to Run)
+
+### 1. 环境准备
+本项目使用了 `accelerate` 进行多卡分布式训练。
+```bash
+# 激活预配置的 conda 环境
+conda activate wei310
+```
+
+### 2. 数据准备与预处理
+如果还没有 `train.json`，需要通过脚本提取特征并生成：
+```bash
+python utils/create_train_json.py \
+    --ffhq_dir 'data/train/FFHQ/' \
+    --ffhq_emb_dir 'output/id_emb/' \
+    --ffhqref_emb_dir 'output/clip_emb/' \
+    --save_dir 'output/train_json/'
+```
+
+### 3. 启动训练 (Training)
+我们提供了一个封装好的多卡启动脚本 `run_train.sh`，内部已经配置好了环境变量和优化器策略。
 
 ```bash
-git clone https://github.com/modyu-liu/FaceMe
-cd FaceMe 
+# 后台启动训练，并将日志输出到 train_log.txt
+bash run_train.sh
 ```
 
-2. Install packages
+**`run_train.sh` 核心参数说明:**
+- `--pretrained_model_name_or_path`: 预训练模型的路径 (如 RealVisXL_V3.0)。
+- `--train_data_dir`: 上一步生成的 `train.json` 路径。
+- `--resolution`: 图像输入分辨率 (例如 128 或 512)。
+- `--mixed_precision`: 支持 `fp16` 混合精度训练，以降低显存占用。
+- `--max_train_samples`: **(调试/测试用)** 可以传入一个整数限制训练集规模。例如传入 `1055` (总数据集 10555 的 10%)，可以快速验证模型。
+
+### 4. 查看日志
+训练日志可以通过 `tail` 或 `cat` 实时查看：
 ```bash
-conda create -n faceme python=3.9
-conda activate faceme
-pip install -r requirements.txt
+tail -f train_log.txt
 ```
-
-
-## :surfer: Quick Inference
-
-
-**Step1: Download Checkpoints**
-
-- Download the [[ControlNet and Mix](https://huggingface.co/thomas2modyu/FaceMe)] checkpoints and place them in the following directories: `weights/controlnet` and `weights/mix`.
-- Download the [[antelopev2](https://github.com/deepinsight/insightface)] checkpoints and place it in the `models/` directory.
-- All other required checkpoints will be downloaded automatically.
-
-**Step2: Prepare testing data**
-
-Place low-quality facial images in `[LQ DIR]:data/lq/` and high-quality reference facial images in `[REF DIR]:data/ref/`.
-
-**Step 3: Running testing command**
-
-```bash
-python infer.py \
-    --pretrained_model_name_or_path "SG161222/RealVisXL_V3.0" \  # Specify the pretrained model path
-    --mix_path [MIX PATH] \                                    # Provide the path to the Mix‘s checkpoint
-    --controlnet_model_name_or_path [CONTROLNET PATH] \        # Provide the path to the ControlNet's checkpoint
-    --input_dir [LQ DIR] \                                     # Directory containing low-quality input images
-    --ref_dir [REF DIR] \                                      # Directory containing high-quality reference images
-    --result_dir [RESULT DIR] \                                # Directory to save the resulting outputs
-    --color_correction \                                       # Apply color correction to the outputs
-    --seed=233                                                 # Set a seed for reproducibility
-```
-Replace the placeholders `[MIX PATH]`, `[CONTROLNET PATH]`, `[LQ DIR]`, `[REF DIR]`, and `[RESULT DIR]` with their respective paths before running the command.
-
-**Step 4: Check the results**
-
-The processed results will be saved in the `[RESULT DIR]` directory.
-
-**:seedling: Gradio Demo**
-```bash
-python demo.py \
-    --pretrained_model_name_or_path "SG161222/RealVisXL_V3.0" \
-    --mix_path [MIX PATH]\
-    --controlnet_model_name_or_path [CONTROLNET PATH] \
-```
-
-
-## :muscle: Train
-
-**Step1: Prepare training data**
-
-The FaceMe model is trained using the  `FFHQ` dataset and its reference counterpart, `FFHQRef`. <a href='https://huggingface.co/datasets/thomas2modyu/FaceMe'><img src='https://img.shields.io/badge/Dataset-huggingface-ffff00.svg'></a> &nbsp;&nbsp;
-
-**Dataset Structure**
-```
--FFHQ DIR
-    -00000.png
-    -00001.png
-    ...
--FFHQRef DIR
-    -target_pose_0
-        -target_pose_0_0
-            -00000.png
-            ...
-        -target_pose_0_1
-            -00000.png
-            ...
-        ...
-    -target_pose_1
-        -target_pose_1_0
-            -00000.png
-            ...
-```
-
-**Step2: Preprocess training data**
-
-Using **ArcFace** and **CLIP image encoder** to extract identity embeddings.
-
-**Command to Preprocess Data**
-```bash
-python utils/preprocess.py \
-    --input_dir [FFHQ/FFHQRef DIR] \
-    --id_emb_save_dir [SAVEDIR]/id_emb/ \
-    --clip_emb_save_dir [SAVEDIR]/clip_emb/ \
-    --dataset_name ['FFHQ'/'FFHQRef']
-```
-**Data Structure After Preprocessing**
-
-```
--FFHQ SAVEDIR
-    -id_emb
-        -00000.npy
-        -00001.npy
-        ...
-    -clip_emb
-        -00000.npy
-        -00001.npy
-        ...
--FFHQRef SAVEDIR
-    -id_emb
-        -00000
-            0_0.npy
-            0_1.npy
-            ...
-        -00001
-            ...
-        ...
-    -clip_emb
-        -00000
-            0_0.npy
-            ...
-        ...
-```
-**Step3: Create train json**
-
-Generate a JSON file to record all training data paths for easy reference during training.
-
-**Command to Create JSON**
-
-```bash
-python utils/create_train_json.py 
-    --ffhq_dir [FFHQ DIR] # Directory containing the FFHQ dataset.
-    --ffhq_emb_dir [FFHQ SAVEDIR] # Directory where FFHQ embeddings (id_emb and clip_emb) are saved.
-    --ffhqref_emb_dir [FFHQRef SAVEDIR] # Directory where FFHQRef embeddings (id_emb and clip_emb) are saved.
-    --save_dir [JSON SAVEDIR] # Path to save the generated JSON file.
-```
-**Step4: Start train**
-
-Use the following command to start the training process:
-
-```bash
-accelerate launch train.py \
-    --pretrained_model_name_or_path "SG161222/RealVisXL_V3.0" \
-    --mix_pretrained_path [optional]{Stage1:None, Stage2:[YOUR SAVEDIR]} \ #  Path to the pretrained Mix model. For Stage 1, use None. for Stage 2, provide the directory path [YOUR SAVEDIR].
-    --output_dir [YOUR SAVEDIR] \ # Directory to save the training outputs, such as model checkpoints.
-    --train_data_dir [JSON SAVEDIR]/train.json \ # Path to the JSON file containing all training data paths (train.json created in Step 3). 
-    --resolution 512 \
-    --report_to "wandb" \
-    --learning_rate 5e-5 \
-    --train_batch_size 4 \
-    --mixed_precision fp16 \
-    --num_workers 4 \
-    --gradient_accumulation_steps 1 \
-    --num_train_epochs 100 \
-    --checkpoint_steps 10000 \
-```
-## 📜 License
-
-This project is licensed under the Pi-Lab License 1.0 - see the [LICENSE](https://github.com/modyu-liu/FaceMe/blob/main/LICENSE) file for details.
-
-## :book: Citation
-
-If you find our repo useful for your research, please consider citing our paper:
-
-```bibtex
-@inproceedings{liu2025faceme,
-  title={FaceMe: Robust Blind Face Restoration with Personal Identification},
-  author={Liu, Siyu and Duan, Zheng-Peng and OuYang, Jia and Fu, Jiayi and Park, Hyunhee and Liu, Zikun and Guo, Chunle and Li, Chongyi},
-  booktitle={Proceedings of the AAAI Conference on Artificial Intelligence},
-  year={2025}
-}
-```
-
-## :postbox: Contact
-
-For technical questions, please contact `liusiyu29[AT]mail.nankai.edu.cn`
-
-
-![visitors](https://visitor-badge.laobi.icu/badge?page_id=modyu-liu/FaceMe)
+模型 Checkpoints 将默认保存在 `./output/train_results/` 中。
