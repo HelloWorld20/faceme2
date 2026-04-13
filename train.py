@@ -6,7 +6,11 @@ import json
 import math
 import random
 import itertools
+import cv2
+import numpy as np
 from tqdm.auto import tqdm
+from PIL import Image
+from skimage.metrics import structural_similarity as ssim
 from transformers import AutoTokenizer, CLIPTextModel, CLIPTextModelWithProjection
 from diffusers import UNet2DConditionModel as OriginalUNet2DConditionModel
 from diffusers import (
@@ -30,6 +34,253 @@ if is_wandb_available():
     pass
 
 logger = get_logger(__name__, log_level="INFO")
+
+def PSNR(restored_img, high_res_img):
+    if isinstance(restored_img, Image.Image):
+        restored_img = np.array(restored_img).astype(np.float32) / 255.0
+    if isinstance(high_res_img, Image.Image):
+        high_res_img = np.array(high_res_img).astype(np.float32) / 255.0
+
+    restored_img = restored_img.astype(np.float32)
+    high_res_img = high_res_img.astype(np.float32)
+
+    mse = np.mean((restored_img - high_res_img) ** 2)
+    if mse == 0:
+        return float("inf")
+    return 20 * np.log10(1.0 / np.sqrt(mse))
+
+
+def SSIM(restored_img, high_res_img):
+    if isinstance(restored_img, Image.Image):
+        restored_img = np.array(restored_img).astype(np.float32) / 255.0
+    if isinstance(high_res_img, Image.Image):
+        high_res_img = np.array(high_res_img).astype(np.float32) / 255.0
+
+    return ssim(restored_img, high_res_img, channel_axis=-1, data_range=1.0)
+
+
+def batch_id_similarity(batch_pred_images, batch_gt_images, arcface_loss):
+    if arcface_loss is None:
+        return 0.0
+
+    arcface_device = next(arcface_loss.resnet.parameters()).device
+    arcface_dtype = next(arcface_loss.resnet.parameters()).dtype
+    pred_batch = batch_pred_images.to(device=arcface_device, dtype=arcface_dtype)
+    gt_batch = batch_gt_images.to(device=arcface_device, dtype=arcface_dtype)
+
+    with torch.no_grad():
+        pred_features = arcface_loss.extract_features(pred_batch)
+        gt_features = arcface_loss.extract_features(gt_batch)
+        similarities = (pred_features * gt_features).sum(dim=1)
+
+    return similarities.mean().item()
+
+
+def evaluate_batch(batch_pred_images, batch_gt_images, arcface_loss):
+    metrics = {
+        "psnr": [],
+        "ssim": [],
+    }
+
+    batch_pred_images = batch_pred_images.detach()
+    batch_gt_images = batch_gt_images.detach()
+
+    for i in range(batch_pred_images.shape[0]):
+        pred_np = batch_pred_images[i].float().cpu().numpy()
+        gt_np = batch_gt_images[i].float().cpu().numpy()
+
+        if pred_np.shape[0] in [1, 3]:
+            pred_np = np.transpose(pred_np, (1, 2, 0))
+        if gt_np.shape[0] in [1, 3]:
+            gt_np = np.transpose(gt_np, (1, 2, 0))
+
+        if pred_np.shape[-1] == 1:
+            pred_np = np.repeat(pred_np, 3, axis=-1)
+        if gt_np.shape[-1] == 1:
+            gt_np = np.repeat(gt_np, 3, axis=-1)
+
+        pred_np = np.clip(pred_np, 0, 1)
+        gt_np = np.clip(gt_np, 0, 1)
+
+        metrics["psnr"].append(PSNR(pred_np, gt_np))
+        metrics["ssim"].append(SSIM(pred_np, gt_np))
+
+    return {
+        "psnr": float(np.mean(metrics["psnr"])),
+        "ssim": float(np.mean(metrics["ssim"])),
+        "id_similarity": batch_id_similarity(batch_pred_images, batch_gt_images, arcface_loss),
+    }
+
+
+class EvaluationVisualizer:
+    def __init__(self, output_dir, max_images=4):
+        self.max_images = max(1, max_images)
+        self.root_dir = os.path.join(output_dir, "eval_visuals")
+        self.tradeoff_dir = os.path.join(self.root_dir, "tradeoff")
+        self.comparison_dir = os.path.join(self.root_dir, "comparisons")
+        self.history_path = os.path.join(self.root_dir, "metrics_history.json")
+        self.history = []
+        os.makedirs(self.tradeoff_dir, exist_ok=True)
+        os.makedirs(self.comparison_dir, exist_ok=True)
+
+    def _save_history(self):
+        with open(self.history_path, "w", encoding="utf-8") as file:
+            json.dump(self.history, file, ensure_ascii=False, indent=2)
+
+    def record_metrics(self, epoch, global_step, metrics):
+        point = {
+            "epoch": int(epoch),
+            "global_step": int(global_step),
+            "psnr": float(metrics["psnr"]),
+            "ssim": float(metrics["ssim"]),
+            "id_similarity": float(metrics["id_similarity"]),
+        }
+        self.history.append(point)
+        self._save_history()
+        self.save_tradeoff_curve()
+
+    def _tensor_to_uint8(self, image_tensor):
+        image = image_tensor.detach().float().cpu().clamp(0, 1).numpy()
+        if image.shape[0] in [1, 3]:
+            image = np.transpose(image, (1, 2, 0))
+        if image.shape[-1] == 1:
+            image = np.repeat(image, 3, axis=-1)
+        image = (image * 255.0).round().astype(np.uint8)
+        return cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+
+    def _draw_curve_panel(self, canvas, points, color, title, x_label, y_label, x_min, x_max, y_min, y_max, left, top, right, bottom):
+        cv2.rectangle(canvas, (left, top), (right, bottom), (220, 220, 220), 1)
+        cv2.putText(canvas, title, (left, top - 18), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (30, 30, 30), 2, cv2.LINE_AA)
+        cv2.putText(canvas, x_label, (left + 80, bottom + 35), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (60, 60, 60), 1, cv2.LINE_AA)
+        cv2.putText(canvas, y_label, (left - 5, top - 40), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (60, 60, 60), 1, cv2.LINE_AA)
+
+        x_span = max(x_max - x_min, 1e-6)
+        y_span = max(y_max - y_min, 1e-6)
+
+        mapped_points = []
+        for x_value, y_value in points:
+            x_ratio = (x_value - x_min) / x_span
+            y_ratio = (y_value - y_min) / y_span
+            x_pixel = int(left + x_ratio * (right - left))
+            y_pixel = int(bottom - y_ratio * (bottom - top))
+            mapped_points.append((x_pixel, y_pixel))
+
+        for i in range(1, len(mapped_points)):
+            cv2.line(canvas, mapped_points[i - 1], mapped_points[i], color, 2, cv2.LINE_AA)
+
+        for i, point in enumerate(mapped_points):
+            cv2.circle(canvas, point, 4, color, -1, cv2.LINE_AA)
+            cv2.putText(canvas, str(i + 1), (point[0] + 6, point[1] - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1, cv2.LINE_AA)
+
+        cv2.putText(canvas, f"{x_min:.2f}", (left - 10, bottom + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (80, 80, 80), 1, cv2.LINE_AA)
+        cv2.putText(canvas, f"{x_max:.2f}", (right - 40, bottom + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (80, 80, 80), 1, cv2.LINE_AA)
+        cv2.putText(canvas, f"{y_min:.3f}", (left - 5, bottom + 38), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (80, 80, 80), 1, cv2.LINE_AA)
+        cv2.putText(canvas, f"{y_max:.3f}", (left - 5, top - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (80, 80, 80), 1, cv2.LINE_AA)
+
+    def save_tradeoff_curve(self):
+        if not self.history:
+            return
+
+        canvas = np.full((720, 1280, 3), 255, dtype=np.uint8)
+        cv2.putText(canvas, "Evaluation Trade-off Curves", (40, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (20, 20, 20), 2, cv2.LINE_AA)
+
+        psnr_points = [(point["psnr"], point["id_similarity"]) for point in self.history]
+        ssim_points = [(point["ssim"], point["id_similarity"]) for point in self.history]
+        psnr_values = [point[0] for point in psnr_points]
+        ssim_values = [point[0] for point in ssim_points]
+        id_values = [point[1] for point in psnr_points]
+
+        psnr_min, psnr_max = min(psnr_values), max(psnr_values)
+        ssim_min, ssim_max = min(ssim_values), max(ssim_values)
+        id_min, id_max = min(id_values), max(id_values)
+
+        psnr_pad = max((psnr_max - psnr_min) * 0.1, 1e-3)
+        ssim_pad = max((ssim_max - ssim_min) * 0.1, 1e-3)
+        id_pad = max((id_max - id_min) * 0.1, 1e-4)
+
+        self._draw_curve_panel(
+            canvas,
+            psnr_points,
+            (64, 114, 224),
+            "PSNR vs ID Similarity",
+            "PSNR",
+            "ID Similarity",
+            psnr_min - psnr_pad,
+            psnr_max + psnr_pad,
+            id_min - id_pad,
+            id_max + id_pad,
+            80,
+            120,
+            590,
+            620,
+        )
+        self._draw_curve_panel(
+            canvas,
+            ssim_points,
+            (46, 139, 87),
+            "SSIM vs ID Similarity",
+            "SSIM",
+            "ID Similarity",
+            ssim_min - ssim_pad,
+            ssim_max + ssim_pad,
+            id_min - id_pad,
+            id_max + id_pad,
+            700,
+            120,
+            1210,
+            620,
+        )
+
+        latest = self.history[-1]
+        summary_lines = [
+            f"Latest epoch: {latest['epoch']}",
+            f"Latest step: {latest['global_step']}",
+            f"PSNR: {latest['psnr']:.4f}",
+            f"SSIM: {latest['ssim']:.4f}",
+            f"ID Similarity: {latest['id_similarity']:.4f}",
+            f"Points: {len(self.history)}",
+        ]
+        for idx, line in enumerate(summary_lines):
+            cv2.putText(canvas, line, (40 + (idx // 3) * 360, 660 + (idx % 3) * 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (30, 30, 30), 1, cv2.LINE_AA)
+
+        cv2.imwrite(os.path.join(self.tradeoff_dir, "tradeoff_latest.png"), canvas)
+        cv2.imwrite(os.path.join(self.tradeoff_dir, f"tradeoff_epoch_{latest['epoch']:04d}_step_{latest['global_step']:06d}.png"), canvas)
+
+    def save_comparison_grid(self, control_images, pred_images, gt_images, epoch, global_step, metrics):
+        batch_size = min(self.max_images, pred_images.shape[0], gt_images.shape[0], control_images.shape[0])
+        if batch_size <= 0:
+            return
+
+        label_width = 120
+        tile_size = 224
+        header_height = 100
+        footer_height = 70
+        canvas = np.full((header_height + batch_size * tile_size + footer_height, label_width + 3 * tile_size, 3), 255, dtype=np.uint8)
+
+        cv2.putText(canvas, f"Epoch {epoch} Step {global_step}", (20, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (25, 25, 25), 2, cv2.LINE_AA)
+        cv2.putText(canvas, f"PSNR {metrics['psnr']:.3f} | SSIM {metrics['ssim']:.4f} | ID {metrics['id_similarity']:.4f}", (20, 52), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (45, 45, 45), 1, cv2.LINE_AA)
+
+        column_titles = ["Input", "Prediction", "Target"]
+        for index, title in enumerate(column_titles):
+            x = label_width + index * tile_size + 60
+            cv2.putText(canvas, title, (x, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (50, 50, 50), 1, cv2.LINE_AA)
+
+        for row in range(batch_size):
+            y0 = header_height + row * tile_size
+            cv2.putText(canvas, f"Sample {row + 1}", (15, y0 + 120), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (50, 50, 50), 1, cv2.LINE_AA)
+            row_images = [
+                self._tensor_to_uint8(control_images[row]),
+                self._tensor_to_uint8(pred_images[row]),
+                self._tensor_to_uint8(gt_images[row]),
+            ]
+            for col, image in enumerate(row_images):
+                image = cv2.resize(image, (tile_size, tile_size), interpolation=cv2.INTER_LINEAR)
+                x0 = label_width + col * tile_size
+                canvas[y0:y0 + tile_size, x0:x0 + tile_size] = image
+                cv2.rectangle(canvas, (x0, y0), (x0 + tile_size, y0 + tile_size), (220, 220, 220), 1)
+
+        save_name = f"epoch_{epoch:04d}_step_{global_step:06d}.png"
+        cv2.imwrite(os.path.join(self.comparison_dir, save_name), canvas)
 
 def load_config(config_path):
     """
@@ -92,8 +343,6 @@ def make_train_dataset(args, tokenizer, text_encoder):
 
     return train_dataset
 
-import gc
-import sys
 
 def log_vram(msg):
     if torch.cuda.is_available():
@@ -102,6 +351,8 @@ def log_vram(msg):
         print(f"[{msg}] VRAM Allocated: {allocated:.2f} GB, Reserved: {reserved:.2f} GB")
 
 def main(args):
+    if args.wandb_api_key:
+        os.environ["WANDB_API_KEY"] = args.wandb_api_key
 
     logging_dir = os.path.join(args.output_dir, "log")
     accelerator_project_config = ProjectConfiguration(project_dir=args.output_dir, logging_dir=logging_dir)
@@ -175,7 +426,7 @@ def main(args):
     ###
 
     # 初始化 SwinIR 质量分支，以及 Perceptual Loss 和 ArcFace Loss
-    swinir = SwinIRQualityBranch(use_checkpoint=False)
+    swinir = SwinIRQualityBranch(use_checkpoint=args.gradient_checkpointing)
     perceptual_loss = PerceptualLoss()
     arcface_loss = ArcFaceLoss()
 
@@ -207,7 +458,7 @@ def main(args):
 
     # 如果 xformers 可用，则使用内存高效的注意力机制 (memory efficient attention)
     import diffusers
-    if diffusers.utils.is_xformers_available():
+    if diffusers.utils.is_xformers_available() and th.cuda.is_available():
         import xformers
         from packaging import version
         xformers_version = version.parse(xformers.__version__)
@@ -253,7 +504,6 @@ def main(args):
     if args.mix_pretrained_path is not None:
         mix.to(accelerator.device, dtype=weight_dtype)
 
-    # SwinIR is very prone to NaN in FP16, keep it in FP32
     swinir.to(accelerator.device, dtype=torch.float32)
     perceptual_loss.to(accelerator.device, dtype=weight_dtype)
     arcface_loss.to(accelerator.device, dtype=weight_dtype)
@@ -313,7 +563,11 @@ def main(args):
             ref_id_emb = ref_id_emb[:, :random_num, :]
             ref_clip_emb = ref_clip_emb[:, :random_num, :]
             # 找到特定 token 进行特征替换/混合
-            index = torch.where(tokens_one == token_id_one)[1][0]
+            if tokens_one.shape[1] > 0:
+                token_matches = torch.where(tokens_one == token_id_one)
+                index = token_matches[1][0].item() if token_matches[1].numel() > 0 else 0
+            else:
+                index = 0
             pref = prompt_embeds[:, :index, :]
             sufx = prompt_embeds[:, index + 1:, :]
             
@@ -415,6 +669,7 @@ def main(args):
     if accelerator.is_main_process:
         tracker_config = dict(vars(args))
         accelerator.init_trackers(args.exp_name, config=tracker_config)
+    visualizer = EvaluationVisualizer(args.output_dir, max_images=args.eval_visual_max_images) if accelerator.is_main_process else None
 
 
     # 开始训练！
@@ -446,6 +701,8 @@ def main(args):
 
     for epoch in range(first_epoch, args.num_train_epochs):
         epoch_loss = 0.0
+        epoch_metrics = {"psnr": 0.0, "ssim": 0.0, "id_similarity": 0.0}
+        eval_count = 0
         for step, batch in enumerate(train_dataloader):
             if step == 0 and accelerator.is_main_process:
                 log_vram(f"Start of Epoch {epoch}, Step 0")
@@ -458,8 +715,18 @@ def main(args):
                 latents = latents * vae.config.scaling_factor
                 latents = latents.to(dtype=weight_dtype)
 
+                if torch.isnan(latents).any() or torch.isinf(latents).any():
+                    if step == 0 and accelerator.is_main_process:
+                        logger.warning(f"Step {step}: latents contains NaN or Inf!")
+                    latents = torch.nan_to_num(latents, nan=0.0, posinf=0.0, neginf=0.0)
+
                 # 采样要添加到 latents 中的噪声
                 noise = torch.randn_like(latents)
+                if torch.isnan(noise).any() or torch.isinf(noise).any():
+                    if step == 0 and accelerator.is_main_process:
+                        logger.warning(f"Step {step}: noise contains NaN or Inf!")
+                    noise = torch.nan_to_num(noise, nan=0.0, posinf=0.0, neginf=0.0)
+
                 bsz = latents.shape[0]
         
                 # 为每张图像采样一个随机的时间步
@@ -468,26 +735,30 @@ def main(args):
 
                 # 根据每个时间步的噪声幅度，将噪声添加到 latents 中（前向扩散过程）
                 noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps).to(dtype=weight_dtype)
+                if torch.isnan(noisy_latents).any() or torch.isinf(noisy_latents).any():
+                    if step == 0 and accelerator.is_main_process:
+                        logger.warning(f"Step {step}: noisy_latents contains NaN or Inf!")
+                    noisy_latents = torch.nan_to_num(noisy_latents, nan=0.0, posinf=0.0, neginf=0.0)
 
                 # SwinIR 质量分支：从模糊图像中提取纹理并修复
                 degraded_image = batch["control"].to(dtype=weight_dtype)
-                
-                # SwinIR requires input in [0, 1], but degraded_image is in [-1, 1]
-                swinir_input = (degraded_image.to(torch.float32) + 1.0) / 2.0
-                
-                # Check swinir weight dtype
+                # DEBUG INFO
                 if step == 0:
-                    print(f"SwinIR conv_first weight dtype: {swinir.module.model.conv_first.weight.dtype if hasattr(swinir, 'module') else swinir.model.conv_first.weight.dtype}", flush=True)
-
-                controlnet_image_fp32 = swinir(swinir_input)
-                # Scale output back to [-1, 1] for ControlNet and Loss
-                controlnet_image_fp32 = controlnet_image_fp32 * 2.0 - 1.0
+                    try:
+                        bias_dtype = swinir.module.model.conv_first.bias.dtype
+                    except AttributeError:
+                        bias_dtype = swinir.model.conv_first.bias.dtype
+                    print(f"DEBUG: weight_dtype={weight_dtype}, degraded_image.dtype={degraded_image.dtype}, swinir_bias.dtype={bias_dtype}")
                 
-                controlnet_image = controlnet_image_fp32.to(dtype=weight_dtype)
+                # 防止 SwinIR 在 fp16 下溢出产生 Inf
+                with torch.autocast("cuda", enabled=False):
+                    controlnet_image = swinir(degraded_image.float()).to(dtype=weight_dtype)
+                    
+                if torch.isnan(controlnet_image).any() or torch.isinf(controlnet_image).any():
+                    if step == 0 and accelerator.is_main_process:
+                        logger.warning(f"Step {step}: controlnet_image contains NaN or Inf!")
+                    controlnet_image = torch.nan_to_num(controlnet_image, nan=0.0, posinf=0.0, neginf=0.0)
                 
-                if step == 0 and accelerator.is_main_process:
-                    logger.warning(f"Step {step} - controlnet_image contains NaN: {torch.isnan(controlnet_image).any().item()}")
-
                 if 'prompt_embeds' in batch.keys():
                     id_prompt_embeds = batch['prompt_embeds'].to(dtype=weight_dtype)
                 else :
@@ -499,8 +770,19 @@ def main(args):
                     mix_emb = mix(clip_emb=ref_clip_emb , id_emb=ref_id_emb)
                     id_prompt_embeds = torch.cat([pref, mix_emb, sufx] , dim=1)[:,:77,:]
                     id_prompt_embeds = id_prompt_embeds.to(dtype=weight_dtype)
+                
+                if torch.isnan(id_prompt_embeds).any() or torch.isinf(id_prompt_embeds).any():
+                    if step == 0 and accelerator.is_main_process:
+                        logger.warning(f"Step {step}: id_prompt_embeds contains NaN or Inf!")
+                    id_prompt_embeds = torch.nan_to_num(id_prompt_embeds, nan=0.0, posinf=0.0, neginf=0.0)
                         
                 unet_added_conditions = {'text_embeds':batch['pooled_prompt_embeds'].to(dtype=weight_dtype), 'time_ids': batch['add_time_ids'].to(dtype=weight_dtype)}
+                
+                for k, v in unet_added_conditions.items():
+                    if torch.isnan(v).any() or torch.isinf(v).any():
+                        if step == 0 and accelerator.is_main_process:
+                            logger.warning(f"Step {step}: unet_added_conditions[{k}] contains NaN or Inf!")
+                        unet_added_conditions[k] = torch.nan_to_num(v, nan=0.0, posinf=0.0, neginf=0.0)
 
                 down_block_res_samples, mid_block_res_sample = controlnet(
                     noisy_latents,
@@ -511,6 +793,17 @@ def main(args):
                     return_dict=False,
                 )
                 
+                # Check controlnet outputs for NaN/Inf
+                for i, sample in enumerate(down_block_res_samples):
+                    if torch.isnan(sample).any() or torch.isinf(sample).any():
+                        if step == 0 and accelerator.is_main_process:
+                            logger.warning(f"Step {step}: down_block_res_samples[{i}] contains NaN or Inf!")
+                        down_block_res_samples[i] = torch.nan_to_num(sample, nan=0.0, posinf=0.0, neginf=0.0)
+                if torch.isnan(mid_block_res_sample).any() or torch.isinf(mid_block_res_sample).any():
+                    if step == 0 and accelerator.is_main_process:
+                        logger.warning(f"Step {step}: mid_block_res_sample contains NaN or Inf!")
+                    mid_block_res_sample = torch.nan_to_num(mid_block_res_sample, nan=0.0, posinf=0.0, neginf=0.0)
+
                 model_pred = unet(
                     noisy_latents,
                     timesteps,
@@ -530,6 +823,16 @@ def main(args):
                     target = noise_scheduler.get_velocity(latents, noise, timesteps)
                 else:
                     raise ValueError(f"未知的预测类型 {noise_scheduler.config.prediction_type}")
+                
+                if torch.isnan(model_pred).any() or torch.isinf(model_pred).any():
+                    if step == 0 and accelerator.is_main_process:
+                        logger.warning(f"Step {step}: model_pred contains NaN or Inf!")
+                    model_pred = torch.nan_to_num(model_pred, nan=0.0, posinf=0.0, neginf=0.0)
+                
+                if torch.isnan(target).any() or torch.isinf(target).any():
+                    if step == 0 and accelerator.is_main_process:
+                        logger.warning(f"Step {step}: target contains NaN or Inf!")
+                    target = torch.nan_to_num(target, nan=0.0, posinf=0.0, neginf=0.0)
                 
                 # 1. 计算原始的扩散模型噪声 MSE Loss
                 loss_mse = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
@@ -557,11 +860,11 @@ def main(args):
                 pred_images_norm = (pred_images / 2 + 0.5).clamp(0, 1)
                 gt_images_norm = (gt_images / 2 + 0.5).clamp(0, 1)
 
-                # 确保 tensor 不是 nan，如果是 nan 就填充为 0
-                if torch.isnan(pred_images_norm).any():
+                # 确保 tensor 不是 nan/inf，如果是 nan/inf 就填充为 0
+                if torch.isnan(pred_images_norm).any() or torch.isinf(pred_images_norm).any():
                     if step == 0 and accelerator.is_main_process:
-                        logger.warning(f"Step {step}: pred_images_norm contains NaN!")
-                    pred_images_norm = torch.nan_to_num(pred_images_norm, nan=0.0)
+                        logger.warning(f"Step {step}: pred_images_norm contains NaN or Inf!")
+                    pred_images_norm = torch.nan_to_num(pred_images_norm, nan=0.0, posinf=0.0, neginf=0.0)
 
                 loss_l1 = F.l1_loss(pred_images_norm, gt_images_norm)
                 
@@ -599,35 +902,34 @@ def main(args):
 
                 # =========================== 新增: 损失异常检测日志 ===========================
                 if step == 0 and accelerator.is_main_process:
-                    logger.warning(f"Step {step} - model_pred contains NaN: {torch.isnan(model_pred).any().item()}")
-                    logger.warning(f"Step {step} - pred_original_sample contains NaN: {torch.isnan(pred_original_sample).any().item()}")
-                    logger.warning(f"Step {step} - pred_images contains NaN: {torch.isnan(pred_images).any().item()}")
-                    logger.warning(f"Step {step} Losses - MSE: {loss_mse.item():.4f}, L1: {loss_l1.item():.4f}, Perceptual: {loss_perceptual.item():.4f}, ID: {loss_id.item():.4f}")
-                    logger.warning(f"Step {step} Total Loss: {total_loss.item():.4f}, is_nan: {torch.isnan(total_loss).item()}, is_inf: {torch.isinf(total_loss).item()}")
+                    logger.info(f"Step {step} Losses - MSE: {loss_mse.item():.4f}, L1: {loss_l1.item():.4f}, Perceptual: {loss_perceptual.item():.4f}, ID: {loss_id.item():.4f}")
+                    logger.info(f"Step {step} Total Loss: {total_loss.item():.4f}, is_nan: {torch.isnan(total_loss).item()}, is_inf: {torch.isinf(total_loss).item()}")
                 
                 loss_is_abnormal = torch.isnan(total_loss) or torch.isinf(total_loss)
                 if loss_is_abnormal:
                     logger.error(f"WARNING: Loss is NaN or Inf at step {step} on Rank {accelerator.process_index}")
-                    # ==============================================================================================
-                    # 关键修复: 如果 loss 是 NaN/Inf，我们不能返回 0.0 然后用它 backward！
-                    # 必须保证 backward 生成的梯度是有效的 dtype（即不会污染 fp16 的 scaler）。
-                    # 当模型参数是 fp16/bf16 时，用 * 0.0 可能会导致后续计算图出问题，
-                    # 更好的方式是用一个非常小的标量或者基于原始 loss scale 下来的 0 标量，并且手动清理异常梯度。
-                    total_loss = torch.tensor(0.0, device=latents.device, dtype=weight_dtype, requires_grad=True)
-
-                # 使用 accelerator.backward
-                accelerator.backward(total_loss)
+                    
+                    # 必须保证 backward 生成的梯度是有效的 dtype，且所有 DDP 进程同步
+                    # The backward crash happens because the dummy tensor does not have a gradient function attached to the model graph.
+                    # Since DDP expects all parameters to receive gradients, we compute dummy loss by multiplying 0 with a model output
+                    dummy_loss = (model_pred * 0.0).sum()
+                    accelerator.backward(dummy_loss)
+                else:
+                    # 使用 accelerator.backward
+                    accelerator.backward(total_loss)
                 
                 # =========================== 关键修复：防止 FP16/BF16 下异常梯度触发 unscale 崩溃 ===========================
                 if loss_is_abnormal:
-                    # 如果 loss 是 NaN，反向传播后计算图中的部分/全部梯度也会变成 NaN。
-                    # 当 DeepSpeed / AMP 尝试 unscale 这些 NaN 梯度时，就会抛出 ValueError: Attempting to unscale FP16 gradients.
-                    # 或者 AssertionError: No inf checks were recorded for this optimizer.
-                    # 因此，我们需要手动将所有梯度置为 0，而不是让 scaler 去面对这些 NaN/Inf。
+                    # 如果 loss 是 NaN，清理可能存在的异常梯度
                     for p in params_to_optimize:
                         if p.grad is not None:
-                            # 直接把 NaN/Inf 的梯度替换为 0
-                            p.grad.data.nan_to_num_(nan=0.0, posinf=0.0, neginf=0.0)
+                            p.grad.data.zero_()
+                    
+                    # 在 step 时，我们可以正常进行，因为梯度是0。
+                    # 如果我们直接 continue，会导致不同 GPU 的进度不一致卡死。
+                else:
+                    # 修复: 只有在 loss 正常的情况下才 backward
+                    pass
 
                 if step == 0 and accelerator.is_main_process:
                     log_vram(f"After Backward Pass Epoch {epoch}, Step 0")
@@ -699,30 +1001,61 @@ def main(args):
                         logger.info(f"Saved state to {save_path}")
                     accelerator.wait_for_everyone() # 确保保存完大家再一起往下跑
 
-            # 安全地获取 loss 的 item，防止 NaN 崩溃
-            def safe_item(tensor):
-                return tensor.detach().item() if tensor is not None else 0.0
-
             logs = {
-                "loss": safe_item(total_loss), 
-                "mse": safe_item(loss_mse),
-                "l1": safe_item(loss_l1),
-                "perceptual": safe_item(loss_perceptual),
-                "id": safe_item(loss_id),
+                "loss": total_loss.detach().item(), 
+                "mse": loss_mse.detach().item(),
+                "l1": loss_l1.detach().item(),
+                "perceptual": loss_perceptual.detach().item(),
+                "id": loss_id.detach().item(),
                 "lr": lr_scheduler.get_last_lr()[0]
             }
-            epoch_loss += safe_item(total_loss)
+            epoch_loss += total_loss.detach().item()
+
+            eval_stride = max(1, len(train_dataloader) // max(1, args.eval_samples))
+            if epoch % args.eval_interval == 0 and step % eval_stride == 0:
+                eval_metrics = evaluate_batch(pred_images_norm, gt_images_norm, arcface_loss)
+                logs.update({
+                    "eval/psnr": eval_metrics["psnr"],
+                    "eval/ssim": eval_metrics["ssim"],
+                    "eval/id_similarity": eval_metrics["id_similarity"],
+                })
+                epoch_metrics["psnr"] += eval_metrics["psnr"]
+                epoch_metrics["ssim"] += eval_metrics["ssim"]
+                epoch_metrics["id_similarity"] += eval_metrics["id_similarity"]
+                if visualizer is not None:
+                    control_images_norm = (batch["control"].detach().float() / 2 + 0.5).clamp(0, 1)
+                    visualizer.record_metrics(epoch, global_step, eval_metrics)
+                    if eval_count == 0:
+                        visualizer.save_comparison_grid(
+                            control_images_norm,
+                            pred_images_norm.detach(),
+                            gt_images_norm.detach(),
+                            epoch,
+                            global_step,
+                            eval_metrics,
+                        )
+                eval_count += 1
             
             progress_bar.set_postfix(**logs)
             accelerator.log(logs, step=global_step)
-
-            # (Debug exit removed)
 
             if global_step >= args.max_train_steps:
                 break
             
         epoch_loss /= len(train_dataloader)
         accelerator.log({"epoch_loss": epoch_loss}, step=global_step)
+        if eval_count > 0:
+            avg_eval_metrics = {
+                "eval/avg_psnr": epoch_metrics["psnr"] / eval_count,
+                "eval/avg_ssim": epoch_metrics["ssim"] / eval_count,
+                "eval/avg_id_similarity": epoch_metrics["id_similarity"] / eval_count,
+            }
+            accelerator.log(avg_eval_metrics, step=global_step)
+            logger.info(
+                f"Epoch {epoch} 评估指标 - PSNR: {avg_eval_metrics['eval/avg_psnr']:.2f}, "
+                f"SSIM: {avg_eval_metrics['eval/avg_ssim']:.4f}, "
+                f"ID_Sim: {avg_eval_metrics['eval/avg_id_similarity']:.4f}"
+            )
     accelerator.wait_for_everyone()
     accelerator.end_training()
 
@@ -751,6 +1084,10 @@ if __name__ == '__main__':
     parser.add_argument("--max_train_samples", type=int, default=None, help="限制训练样本数量，用于快速测试")
     parser.add_argument("--gradient_checkpointing", action="store_true", help="是否启用梯度检查点以节省显存")
     parser.add_argument("--use_8bit_adam", action="store_true", help="是否使用 8-bit Adam 优化器以节省显存")
+    parser.add_argument("--eval_interval", type=int, default=1, help="每隔多少个 epoch 记录一次评估指标")
+    parser.add_argument("--eval_samples", type=int, default=5, help="每个 epoch 采样多少次批次用于评估指标")
+    parser.add_argument("--eval_visual_max_images", type=int, default=4, help="每次保存可视化时最多展示多少个样本")
+    parser.add_argument("--wandb_api_key", type=str, default=None, help="wandb API key")
 
     
     args = parser.parse_args()
